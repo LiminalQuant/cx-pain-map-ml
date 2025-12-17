@@ -1,0 +1,8 @@
+streamlit
+pandas
+matplotlib
+openpyxl
+python-dateutil
+joblib
+sentence-transformers
+scikit-learn

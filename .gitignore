@@ -1,0 +1,17 @@
+# python
+__pycache__/
+*.pyc
+
+# env
+venv/
+ml_env/
+
+# streamlit
+.streamlit/
+
+# artifacts
+*.xlsx
+*.csv
+
+# misc
+.DS_Store
