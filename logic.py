@@ -19,10 +19,15 @@ def build_pain_matrix(
     segments=("Netral", "Detractor")
 ):
     df = df.copy()
+
+    # 1. дедупликация отзывов (если нет review_id — аккуратно)
+    df = df.drop_duplicates(subset=[date_col, topic_col, segment_col])
+
     df["bill_date"] = df[date_col].apply(parse_date)
     df["week"] = df["bill_date"].dt.to_period("W").astype(str)
 
     rows = []
+
     for _, r in df.iterrows():
         if r.get(segment_col) not in segments:
             continue
@@ -31,10 +36,17 @@ def build_pain_matrix(
         if pd.isna(r["week"]):
             continue
 
-        for t in str(r[topic_col]).split(","):
+        # 2. уникальные темы внутри одного отзыва
+        topics = {
+            t.strip()
+            for t in str(r[topic_col]).split(",")
+            if t.strip()
+        }
+
+        for t in topics:
             rows.append({
                 "week": r["week"],
-                "topic": t.strip(),
+                "topic": t,
                 "segment": r[segment_col]
             })
 
@@ -58,3 +70,4 @@ def build_pain_matrix(
     }
 
     return weekly, pivots
+
