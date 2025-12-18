@@ -37,8 +37,9 @@ if uploaded:
         weekly, pivots = build_pain_matrix(
             df_ml,
             date_col=date_col,
-            topic_col="ml_topics",
-            segment_col=segment_col
+            topic_col=topic_col,
+            segment_col=segment_col,
+            text_col=text_col
         )
 
         st.success("Готово")
