@@ -16,13 +16,27 @@ def build_pain_matrix(
     date_col,
     topic_col,
     segment_col,
+    text_col,
     segments=("Netral", "Detractor")
 ):
     df = df.copy()
 
-    # 1. дедупликация отзывов (если нет review_id — аккуратно)
-    df = df.drop_duplicates(subset=[date_col, topic_col, segment_col])
+    # --- нормализация текста ---
+    df["_comment_norm"] = (
+        df[text_col]
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .str.replace("\n", " ", regex=False)
+    )
 
+    df = df[df["_comment_norm"] != ""]
+
+    # --- дедупликация по комментарию ---
+    df = df.sort_values(date_col)
+    df = df.drop_duplicates(subset=["_comment_norm"], keep="first")
+
+    # --- дата ---
     df["bill_date"] = df[date_col].apply(parse_date)
     df["week"] = df["bill_date"].dt.to_period("W").astype(str)
 
@@ -36,7 +50,6 @@ def build_pain_matrix(
         if pd.isna(r["week"]):
             continue
 
-        # 2. уникальные темы внутри одного отзыва
         topics = {
             t.strip()
             for t in str(r[topic_col]).split(",")
