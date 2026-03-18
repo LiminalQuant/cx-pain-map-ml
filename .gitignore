@@ -17,3 +17,5 @@ ml_env/
 .DS_Store
 
 .env
+
+secrets.toml 
