@@ -6,3 +6,4 @@ python-dateutil
 joblib
 sentence-transformers
 scikit-learn
+python-dotenv
