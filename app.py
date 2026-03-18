@@ -964,33 +964,26 @@ with tab1:
 # =========================================================
 
 with tab2:
-    # Импортируем необходимые функции из ml и logic
-    # Примечание: эти функции должны быть доступны в вашем окружении
-    # from ml import predict_topics
-    # from logic import build_pain_matrix
-    
-    # Для работы этого кода убедитесь, что файлы ml.py и logic.py находятся в той же директории
-    
     st.header("🎯 CX Pain Map — ML driven")
     
-    # Пытаемся импортировать необходимые функции
-    try:
-        from ml import predict_topics
-        from logic import build_pain_matrix
-        ml_available = True
-    except ImportError as e:
-        st.error(f"Не удалось импортировать модули ML: {e}")
-        st.info("Убедитесь, что файлы ml.py и logic.py находятся в той же директории")
-        ml_available = False
+    uploaded2 = st.file_uploader(
+        "Загрузите файл (xlsx / csv)",
+        type=["xlsx", "csv"],
+        key="uploader2"
+    )
     
-    if ml_available:
-        uploaded2 = st.file_uploader(
-            "Загрузите файл (xlsx / csv)",
-            type=["xlsx", "csv"],
-            key="uploader2"
-        )
-    
-        if uploaded2:
+    if uploaded2:
+        # Импортируем ТОЛЬКО когда есть файл и пользователь готов работать
+        try:
+            from ml import predict_topics
+            from logic import build_pain_matrix
+            ml_available = True
+        except Exception as e:
+            st.error(f"Ошибка загрузки ML модулей: {e}")
+            st.info("Проверьте файлы ml.py и logic.py")
+            ml_available = False
+        
+        if ml_available:
             if uploaded2.name.endswith(".xlsx"):
                 df2 = pd.read_excel(uploaded2)
             else:
@@ -1056,5 +1049,3 @@ with tab2:
                     file_name="pain_map.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-    else:
-        st.warning("Модули ML не доступны. Пожалуйста, убедитесь, что файлы ml.py и logic.py находятся в директории приложения.")
