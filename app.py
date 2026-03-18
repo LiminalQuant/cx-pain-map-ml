@@ -201,7 +201,10 @@ with tab1:
         }
     
         r = requests.post(URL, headers=headers, json=payload, timeout=120)
-        r.raise_for_status()
+        if r.status_code != 200:
+            st.error(f"STATUS: {r.status_code}")
+            st.error(r.text)
+            raise Exception("LLM request failed")
     
         data = r.json()
         content = data["message"]["content"].strip()
