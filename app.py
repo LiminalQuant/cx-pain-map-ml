@@ -14,47 +14,17 @@ import os
 # CONFIG
 # =========================================================
 
-import io
-import re
-import json
-import math
-import requests
-import pandas as pd
-import streamlit as st
-import plotly.express as px
-import matplotlib.pyplot as plt
-from dotenv import load_dotenv
-import os
+load_dotenv()
 
-# =========================================================
-# CONFIG
-# =========================================================
-
-# Сначала пробуем получить секреты из Streamlit Cloud
+# Простая проверка: сначала st.secrets, потом os.getenv
 try:
     API_KEY = st.secrets["OLLAMA_API_KEY"]
     URL = st.secrets["OLLAMA_URL"]
     MODEL = st.secrets["OLLAMA_MODEL"]
-    secrets_loaded = True
 except:
-    # Если не получилось, загружаем из .env для локальной разработки
-    load_dotenv()
     API_KEY = os.getenv("OLLAMA_API_KEY")
     URL = os.getenv("OLLAMA_URL")
     MODEL = os.getenv("OLLAMA_MODEL")
-    secrets_loaded = False
-
-# Проверка что секреты загружены
-if not API_KEY or not URL or not MODEL:
-    st.warning("⚠️ API credentials not found. LLM features will be disabled.")
-    LLM_ENABLED = False
-else:
-    LLM_ENABLED = True
-    # Показываем откуда загружены секреты
-    if secrets_loaded:
-        st.sidebar.success("✅ API credentials loaded from Streamlit Secrets")
-    else:
-        st.sidebar.success("✅ API credentials loaded from .env file")
 
 st.set_page_config(
     page_title="CX Analytics Dashboard",
