@@ -19,6 +19,13 @@ import os
 # Для Streamlit Cloud
 
 API_KEY = st.secrets["OLLAMA_API_KEY"].strip()
+API_KEY = (
+    API_KEY
+    .replace("\n", "")
+    .replace("\r", "")
+    .replace("\u200b", "")
+    .strip()
+)
 URL = st.secrets["OLLAMA_URL"].strip()
 MODEL = "gpt-oss:120b"
 
