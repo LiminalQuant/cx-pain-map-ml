@@ -15,7 +15,8 @@ import os
 # =========================================================
 
 
-
+st.write("RAW:", repr(API_KEY))
+st.write("LEN:", len(API_KEY))
 # Для Streamlit Cloud
 
 API_KEY = st.secrets["OLLAMA_API_KEY"].strip()
