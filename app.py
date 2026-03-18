@@ -16,15 +16,9 @@ import os
 
 load_dotenv()
 
-# Простая проверка: сначала st.secrets, потом os.getenv
-try:
-    API_KEY = st.secrets["OLLAMA_API_KEY"]
-    URL = st.secrets["OLLAMA_URL"]
-    MODEL = st.secrets["OLLAMA_MODEL"]
-except:
-    API_KEY = os.getenv("OLLAMA_API_KEY")
-    URL = os.getenv("OLLAMA_URL")
-    MODEL = os.getenv("OLLAMA_MODEL")
+API_KEY = os.getenv("OLLAMA_API_KEY") or st.secrets.get("OLLAMA_API_KEY")
+URL = os.getenv("OLLAMA_URL") or st.secrets.get("OLLAMA_URL")
+MODEL = os.getenv("OLLAMA_MODEL") or st.secrets.get("OLLAMA_MODEL")
 
 st.set_page_config(
     page_title="CX Analytics Dashboard",
