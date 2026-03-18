@@ -18,8 +18,8 @@ import os
 
 # Для Streamlit Cloud
 
-API_KEY = st.secrets["OLLAMA_API_KEY"].strip()
-URL = "https://ollama.com/api/chat"
+API_KEY = "1ffac868d22741f694089c5cb9a40ed8.MHL5gZXEVELLShsxGjr1VQeL"
+URL = st.secrets["OLLAMA_URL"].strip()
 MODEL = "gpt-oss:120b"
 
 
