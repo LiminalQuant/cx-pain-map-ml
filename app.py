@@ -19,16 +19,16 @@ import os
 # Для Streamlit Cloud
 
 API_KEY = st.secrets["OLLAMA_API_KEY"].strip()
-API_KEY = (
-    API_KEY
-    .replace("\n", "")
-    .replace("\r", "")
-    .replace("\u200b", "")
-    .strip()
-)
+
 URL = st.secrets["OLLAMA_URL"].strip()
 MODEL = "gpt-oss:120b"
+key_from_secret = st.secrets["OLLAMA_API_KEY"]
+key_from_code = "1ffac868d22741f694089c5cb9a40ed8.MHL5gZXVELLSHsxGjr1VQeL"
 
+st.write("SECRET:", repr(key_from_secret))
+st.write("CODE  :", repr(key_from_code))
+
+st.write("EQUAL:", key_from_secret == key_from_code)
 
 st.set_page_config(
     page_title="CX Analytics Dashboard",
