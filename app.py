@@ -14,18 +14,14 @@ import os
 # CONFIG
 # =========================================================
 
-load_dotenv()
+
 
 # Для Streamlit Cloud
-try:
-    API_KEY = "f1fac868d22741f694089c5cb9a40ed8.MHL5gZXEVELLShsxGjr1VQeL"
-    URL = st.secrets["OLLAMA_URL"]
-    MODEL = st.secrets["OLLAMA_MODEL"]
-except:
-    # Для локальной разработки
-    API_KEY = os.getenv("OLLAMA_API_KEY")
-    URL = os.getenv("OLLAMA_URL")
-    MODEL = os.getenv("OLLAMA_MODEL")
+
+API_KEY = "1ffac868d22741f694089c5cb9a40ed8.MHL5gZXEVELLShsxGjr1VQeL"
+URL = "https://ollama.com/api/chat"
+MODEL = "gpt-oss:120b"
+
 
 st.set_page_config(
     page_title="CX Analytics Dashboard",
