@@ -1,21 +1,38 @@
 # python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
 
 # env
 venv/
 ml_env/
+.env
+.env.local
+.env.*.local
 
 # streamlit
 .streamlit/
+secrets.toml
 
 # artifacts
 *.xlsx
 *.csv
+*.xls
+*.parquet
+*.feather
+temp_data/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
 
 # misc
 .DS_Store
-
-.env
-
-secrets.toml 
+Thumbs.db
