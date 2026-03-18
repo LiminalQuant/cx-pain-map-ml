@@ -22,13 +22,7 @@ API_KEY = st.secrets["OLLAMA_API_KEY"].strip()
 
 URL = st.secrets["OLLAMA_URL"].strip()
 MODEL = "gpt-oss:120b"
-key_from_secret = st.secrets["OLLAMA_API_KEY"]
-key_from_code = "1ffac868d22741f694089c5cb9a40ed8.MHL5gZXVELLSHsxGjr1VQeL"
 
-st.write("SECRET:", repr(key_from_secret))
-st.write("CODE  :", repr(key_from_code))
-
-st.write("EQUAL:", key_from_secret == key_from_code)
 
 st.set_page_config(
     page_title="CX Analytics Dashboard",
@@ -202,6 +196,11 @@ with tab1:
             "Authorization": f"Bearer {API_KEY}",
             "Content-Type": "application/json"
         }
+
+        st.write("---- DEBUG AUTH ----")
+        st.write("API_KEY repr:", repr(API_KEY))
+        st.write("API_KEY len:", len(API_KEY) if API_KEY else None)
+        st.write("Authorization header:", headers["Authorization"][:50])
     
         r = requests.post(URL, headers=headers, json=payload, timeout=120)
         if r.status_code != 200:
