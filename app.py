@@ -16,9 +16,26 @@ import os
 
 load_dotenv()
 
-API_KEY = os.getenv("OLLAMA_API_KEY")
-URL = os.getenv("OLLAMA_URL")
-MODEL = os.getenv("OLLAMA_MODEL")
+try:
+    # Для Streamlit Cloud
+    API_KEY = st.secrets["OLLAMA_API_KEY"]
+    URL = st.secrets["OLLAMA_URL"]
+    MODEL = st.secrets["OLLAMA_MODEL"]
+except:
+    # Для локальной разработки
+    load_dotenv()
+    API_KEY = os.getenv("OLLAMA_API_KEY")
+    URL = os.getenv("OLLAMA_URL")
+    MODEL = os.getenv("OLLAMA_MODEL")
+    
+# Проверка что секреты загружены
+if not API_KEY or not URL or not MODEL:
+    st.warning("⚠️ API credentials not found. LLM features will be disabled.")
+    LLM_ENABLED = False
+else:
+    LLM_ENABLED = True
+    # Для отладки (можно закомментировать)
+    st.sidebar.success("✅ API credentials loaded")
 
 st.set_page_config(
     page_title="CX Analytics Dashboard",
