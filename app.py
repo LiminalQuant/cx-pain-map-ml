@@ -18,7 +18,7 @@ load_dotenv()
 
 # Для Streamlit Cloud
 try:
-    API_KEY = st.secrets["OLLAMA_API_KEY"]
+    API_KEY = "f1fac868d22741f694089c5cb9a40ed8.MHL5gZXEVELLShsxGjr1VQeL"
     URL = st.secrets["OLLAMA_URL"]
     MODEL = st.secrets["OLLAMA_MODEL"]
 except:
