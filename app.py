@@ -197,10 +197,7 @@ with tab1:
             "Content-Type": "application/json"
         }
 
-        st.write("---- DEBUG AUTH ----")
-        st.write("API_KEY repr:", repr(API_KEY))
-        st.write("API_KEY len:", len(API_KEY) if API_KEY else None)
-        st.write("Authorization header:", headers["Authorization"][:50])
+       
     
         r = requests.post(URL, headers=headers, json=payload, timeout=120)
         if r.status_code != 200:
