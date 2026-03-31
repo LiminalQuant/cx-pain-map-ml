@@ -1,96 +1,160 @@
 from pathlib import Path
-import joblib
+import json
+import re
+import requests
 import pandas as pd
 import streamlit as st
 
-# ---------------------------------------------------------
-# PATHS
-# ---------------------------------------------------------
-
-BASE_DIR = Path(__file__).resolve().parent
-MODEL_PATH = BASE_DIR / "model" / "nps_sbert_model.pkl"
-ENCODER_PATH = BASE_DIR / "model" / "nps_mlb.pkl"
+URL = st.secrets["OLLAMA_URL"].strip()
+API_KEY = st.secrets["OLLAMA_API_KEY"].strip()
+MODEL = "gpt-oss:120b"
 
 
-# ---------------------------------------------------------
-# PICKLE COMPAT SHIM
-# ---------------------------------------------------------
-# Старый pickle ищет:
-# transformers.models.bert.modeling_bert.BertSdpaSelfAttention
-# В текущем transformers этого класса может уже не быть.
-# Подкладываем алиас на BertSelfAttention, чтобы joblib.load не падал.
+def ask_llm_json(prompt: str) -> dict:
+    payload = {
+        "model": MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "Ты аналитик CX. "
+                    "Классифицируй жалобы пациентов по темам. "
+                    "Отвечай строго JSON без markdown и без пояснений."
+                )
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "stream": False
+    }
 
-def patch_transformers_pickle_compat():
-    try:
-        import transformers.models.bert.modeling_bert as modeling_bert
+    headers = {
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json"
+    }
 
-        if not hasattr(modeling_bert, "BertSdpaSelfAttention"):
-            if hasattr(modeling_bert, "BertSelfAttention"):
-                class BertSdpaSelfAttention(modeling_bert.BertSelfAttention):
-                    pass
+    r = requests.post(URL, headers=headers, json=payload, timeout=180)
 
-                modeling_bert.BertSdpaSelfAttention = BertSdpaSelfAttention
+    if r.status_code != 200:
+        raise RuntimeError(f"LLM request failed: {r.status_code} {r.text}")
 
-        return True, None
-    except Exception as e:
-        return False, e
+    data = r.json()
+    content = data["message"]["content"].strip()
 
+    match = re.search(r"\{.*\}", content, re.S)
+    if not match:
+        raise RuntimeError(f"LLM did not return valid JSON: {content[:1000]}")
 
-# ---------------------------------------------------------
-# LOAD ARTIFACTS
-# ---------------------------------------------------------
-
-@st.cache_resource(show_spinner=False)
-def load_ml_artifacts():
-    ok, patch_error = patch_transformers_pickle_compat()
-    if not ok:
-        raise RuntimeError(
-            f"Не удалось применить compatibility patch для transformers: "
-            f"{type(patch_error).__name__}: {patch_error}"
-        )
-
-    bundle = joblib.load(MODEL_PATH)
-    encoder = joblib.load(ENCODER_PATH)
-
-    clf = bundle["clf"]
-    embedder = bundle["embedder"]
-
-    return clf, embedder, encoder
+    return json.loads(match.group())
 
 
-# ---------------------------------------------------------
-# PREDICT
-# ---------------------------------------------------------
+def normalize_text(x) -> str:
+    if x is None:
+        return ""
+    x = str(x).strip()
+    if x.lower() in {"nan", "none", "null"}:
+        return ""
+    return re.sub(r"\s+", " ", x)
+
+
+def build_topic_prompt(texts: list[str], allowed_topics: list[str]) -> str:
+    topic_list = "\n".join([f"- {t}" for t in allowed_topics])
+
+    items = []
+    for i, txt in enumerate(texts, start=1):
+        items.append(f"{i}. {txt}")
+
+    items_block = "\n".join(items)
+
+    return f"""
+Ниже комментарии пациентов.
+
+Нужно для каждого комментария определить 1-3 наиболее подходящие темы из фиксированного списка.
+
+СПИСОК ДОПУСТИМЫХ ТЕМ:
+{topic_list}
+
+ПРАВИЛА:
+1. Используй только темы из списка.
+2. Если тема не подходит — верни пустой список.
+3. Не выдумывай новые темы.
+4. Если комментарий слишком общий — выбери самые близкие темы по смыслу.
+5. На выходе строго JSON формата:
+
+{{
+  "items": [
+    {{
+      "id": 1,
+      "topics": ["тема1", "тема2"]
+    }}
+  ]
+}}
+
+КОММЕНТАРИИ:
+{items_block}
+""".strip()
+
+
+def chunk_list(items, size):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
 
 def predict_topics(df, text_col, threshold=0.5):
-    clf, embedder, encoder = load_ml_artifacts()
+    """
+    Совместимая сигнатура, чтобы app.py почти не трогать.
+    threshold здесь не используется, но оставлен для совместимости интерфейса.
+    """
+    df = df.copy().reset_index(drop=True)
+    df["_text_norm"] = df[text_col].apply(normalize_text)
 
-    texts = df[text_col].astype(str).fillna("").tolist()
+    # Можно потом вынести в UI, но для теста зафиксируем список
+    allowed_topics = [
+        "Ожидание / очереди",
+        "Запись / перенос приема",
+        "Коммуникация персонала",
+        "Навигация / организация процесса",
+        "Документы / оформление",
+        "Стоимость / оплата",
+        "Мобильное приложение / сайт",
+        "Контакт-центр / дозвон",
+        "Прием врача",
+        "Диагностика / обследование",
+        "Повторные визиты",
+        "Результаты / обратная связь",
+    ]
 
-    X = embedder.encode(
-        texts,
-        batch_size=32,
-        show_progress_bar=False
-    )
+    texts = df["_text_norm"].tolist()
+    batch_size = 20
 
-    probs = clf.predict_proba(X)
-    topic_cols = encoder.classes_
+    all_topics = [""] * len(df)
 
-    prob_df = pd.DataFrame(
-        probs,
-        columns=[f"prob_{t}" for t in topic_cols]
-    )
+    indexed_texts = list(enumerate(texts))
 
-    topics = []
-    for row in probs:
-        labels = [
-            topic_cols[i]
-            for i, p in enumerate(row)
-            if p >= threshold
-        ]
-        topics.append(",".join(labels))
+    for batch in chunk_list(indexed_texts, batch_size):
+        batch_indices = [idx for idx, _ in batch]
+        batch_texts = [txt for _, txt in batch]
 
-    df = df.reset_index(drop=True)
-    df["ml_topics"] = topics
+        prompt = build_topic_prompt(batch_texts, allowed_topics)
+        parsed = ask_llm_json(prompt)
 
-    return pd.concat([df, prob_df], axis=1)
+        result_items = parsed.get("items", [])
+
+        local_topics_map = {}
+        for item in result_items:
+            item_id = item.get("id")
+            topics = item.get("topics", [])
+            if not isinstance(topics, list):
+                topics = []
+            topics = [str(t).strip() for t in topics if str(t).strip() in allowed_topics]
+            local_topics_map[item_id] = ",".join(topics)
+
+        for local_pos, global_idx in enumerate(batch_indices, start=1):
+            all_topics[global_idx] = local_topics_map.get(local_pos, "")
+
+    df["ml_topics"] = all_topics
+
+    # Для совместимости с экспортом можно добавить пустые prob-колонки не надо.
+    return df.drop(columns=["_text_norm"])
