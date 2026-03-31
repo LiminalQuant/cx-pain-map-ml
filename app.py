@@ -1,20 +1,16 @@
 import io
 import re
 import json
-import math
 import requests
 import pandas as pd
 import streamlit as st
 import plotly.express as px
 import matplotlib.pyplot as plt
-from dotenv import load_dotenv
-import os
 
 # =========================================================
 # CONFIG
 # =========================================================
 
-# Для Streamlit Cloud
 API_KEY = st.secrets["OLLAMA_API_KEY"].strip()
 URL = st.secrets["OLLAMA_URL"].strip()
 MODEL = "gpt-oss:120b"
@@ -26,45 +22,46 @@ st.set_page_config(
 )
 
 # =========================================================
-# CONFIGURACION DE PESTAÑAS
+# TABS
 # =========================================================
 
 tab1, tab2 = st.tabs(["📊 Root Cause Analytics", "🎯 Pain Map ML"])
 
 # =========================================================
-# HELPER FUNCTIONS (общие для обоих скриптов)
+# COMMON HELPERS
 # =========================================================
 
 def to_excel_bytes(dfs: dict[str, pd.DataFrame]) -> bytes:
     buffer = io.BytesIO()
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
         for sheet_name, df in dfs.items():
-            safe_name = re.sub(r"[\[\]\*\:/\\\?]", "_", sheet_name)[:31]
+            safe_name = re.sub(r"[\[\]\*\:/\\\?]", "_", str(sheet_name))[:31]
             df.to_excel(writer, sheet_name=safe_name, index=False)
     buffer.seek(0)
     return buffer.getvalue()
+
 
 # =========================================================
 # TAB 1: ROOT CAUSE ANALYTICS
 # =========================================================
 
 with tab1:
-    # =========================================================
-    # CONSTANTS
-    # =========================================================
+    # =====================================================
+    # SCHEMAS / CONSTANTS
+    # =====================================================
 
     CX_SCHEMA_FULL = {
-    "Дата талона": "date",
-    "ЭМК пациента": "patient_id",
-    "Название клиники": "clinic",
-    "Категория клиники": "clinic_category",
-    "Регоион клиники": "clinic_region",
-    "Тип респондента": "segment",
-    "Вопрос": "question",
-    "Ответ": "answer",
-    "Опция ответа": "answer_option",
+        "Дата талона": "date",
+        "ЭМК пациента": "patient_id",
+        "Название клиники": "clinic",
+        "Категория клиники": "clinic_category",
+        "Регоион клиники": "clinic_region",
+        "Тип респондента": "segment",
+        "Вопрос": "question",
+        "Ответ": "answer",
+        "Опция ответа": "answer_option",
     }
-    
+
     CX_SCHEMA_COMMENT = {
         "Дата талона": "date",
         "ЭМК пациента": "patient_id",
@@ -77,63 +74,57 @@ with tab1:
 
     TARGET_SEGMENTS = ["Критик", "Нейтрал"]
 
-    # =========================================================
+    # =====================================================
     # HELPERS
-    # =========================================================
-    def detect_cx_schema(df: pd.DataFrame) -> str:
-    cols = set(df.columns.astype(str).str.strip())
+    # =====================================================
 
-    full_required = set(CX_SCHEMA_FULL.keys())
-    comment_required = set(CX_SCHEMA_COMMENT.keys())
-
-    if full_required.issubset(cols):
-        return "full"
-
-    if comment_required.issubset(cols):
-        return "comment"
-
-    return "unknown"
-    
     def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
         df.columns = (
-            df.columns
-            .astype(str)
+            df.columns.astype(str)
             .str.replace("\xa0", " ", regex=False)
+            .str.replace(r"\s+", " ", regex=True)
             .str.strip()
         )
         return df
 
-    def clean_text_for_llm(x: str) -> str:
+    def detect_cx_schema(df: pd.DataFrame) -> str:
+        cols = set(df.columns.astype(str).str.strip())
+
+        full_required = set(CX_SCHEMA_FULL.keys())
+        comment_required = set(CX_SCHEMA_COMMENT.keys())
+
+        if full_required.issubset(cols):
+            return "full"
+
+        if comment_required.issubset(cols):
+            return "comment"
+
+        return "unknown"
+
+    def clean_text_for_llm(x) -> str:
         if x is None:
             return ""
-        x = str(x).strip()
-        if x.lower() in {"nan", "none", "null"}:
+        text = str(x).strip()
+        if text.lower() in {"nan", "none", "null"}:
             return ""
-        return re.sub(r"\s+", " ", x).strip()
+        return re.sub(r"\s+", " ", text).strip()
 
     def build_llm_text(answer: str, answer_option: str) -> str:
         answer = clean_text_for_llm(answer)
         answer_option = clean_text_for_llm(answer_option)
-    
+
         parts = []
-    
+
         if answer_option and answer_option.lower() not in {"-", "без ответа", "nan", "none"}:
             parts.append(f"Опция ответа: {answer_option}")
-    
+
         if answer and answer.lower() not in {"-", "без ответа", "nan", "none"}:
             parts.append(f"Комментарий: {answer}")
-    
+
         return "\n".join(parts).strip()
 
     def is_meaningful_text(value: str) -> bool:
-        """
-        Берем только нормальный текст для LLM:
-        - не пусто
-        - не число
-        - не одно короткое слово
-        - не "да/нет/ок/норм"
-        """
         if value is None:
             return False
 
@@ -150,7 +141,6 @@ with tab1:
         if low in trash:
             return False
 
-        # чисто число / оценка
         if re.fullmatch(r"[-+]?\d+([.,]\d+)?", text):
             return False
 
@@ -176,7 +166,6 @@ with tab1:
             "да", "нет", "ок", "норм", "норма", "хорошо", "спасибо",
             "отлично", "плохо", "ужас", "комментариев нет"
         }
-
         if low in trash:
             return False
 
@@ -193,78 +182,105 @@ with tab1:
 
         return True
 
+    def read_uploaded_table(uploaded_file) -> pd.DataFrame:
+        """
+        Пробуем header=1 и header=0, выбираем тот вариант, где лучше распознается схема.
+        Для CSV тоже делаем fallback.
+        """
+        file_name = uploaded_file.name.lower()
+
+        if file_name.endswith(".csv"):
+            uploaded_file.seek(0)
+            df0 = pd.read_csv(uploaded_file)
+            df0 = normalize_columns(df0)
+
+            if detect_cx_schema(df0) != "unknown":
+                return df0
+
+            uploaded_file.seek(0)
+            df1 = pd.read_csv(uploaded_file, header=1)
+            df1 = normalize_columns(df1)
+
+            if detect_cx_schema(df1) != "unknown":
+                return df1
+
+            return df0
+
+        candidates = []
+
+        for header_row in [1, 0]:
+            try:
+                uploaded_file.seek(0)
+                dfx = pd.read_excel(uploaded_file, header=header_row)
+                dfx = normalize_columns(dfx)
+                dfx = dfx.loc[:, ~dfx.columns.str.contains(r"^Unnamed", case=False, regex=True)]
+                schema = detect_cx_schema(dfx)
+                score = 1 if schema != "unknown" else 0
+                candidates.append((score, header_row, dfx))
+            except Exception:
+                continue
+
+        if not candidates:
+            raise ValueError("Не удалось прочитать файл как Excel/CSV")
+
+        candidates.sort(key=lambda x: (x[0], -x[1]), reverse=True)
+        return candidates[0][2]
+
     def load_file(uploaded_file) -> pd.DataFrame:
         """
         Поддержка двух CX-схем:
+
         1) Полная:
            Дата талона / ЭМК пациента / Название клиники / Категория клиники /
            Регоион клиники / Тип респондента / Вопрос / Ответ / Опция ответа
-    
+
         2) Упрощенная:
            Дата талона / Название клиники / ЭМК пациента / Тип респондента /
            Вопрос / Оценка / Комментарий
-    
-        На выходе всегда получаем унифицированные поля:
+
+        На выходе:
         date, patient_id, clinic, clinic_category, clinic_region,
-        segment, question, answer, answer_option, score, llm_text
+        segment, question, answer, answer_option, score, llm_text, source_schema
         """
-        if uploaded_file.name.lower().endswith(".csv"):
-            df = pd.read_csv(uploaded_file)
-        else:
-            try:
-                df = pd.read_excel(uploaded_file, header=1)
-                df = normalize_columns(df)
-                if len(df.columns) <= 2:
-                    uploaded_file.seek(0)
-                    df = pd.read_excel(uploaded_file, header=0)
-            except Exception:
-                uploaded_file.seek(0)
-                df = pd.read_excel(uploaded_file, header=0)
-    
+        df = read_uploaded_table(uploaded_file)
         df = normalize_columns(df)
-    
-        # убрать мусорные unnamed-колонки
         df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False, regex=True)]
-    
+
         schema_type = detect_cx_schema(df)
-    
+
         if schema_type == "full":
             df = df.rename(columns=CX_SCHEMA_FULL)
-    
-            # если score нет в старой схеме — просто добавим пустым
             if "score" not in df.columns:
                 df["score"] = pd.NA
-    
+
         elif schema_type == "comment":
             df = df.rename(columns=CX_SCHEMA_COMMENT)
-    
-            # дополняем отсутствующие поля, чтобы пайп не ломался
+
             if "clinic_category" not in df.columns:
                 df["clinic_category"] = "Не указано"
-    
+
             if "clinic_region" not in df.columns:
                 df["clinic_region"] = "Не указано"
-    
+
             if "answer_option" not in df.columns:
                 df["answer_option"] = ""
-    
+
         else:
             raise ValueError(
                 "Формат файла не распознан.\n\n"
                 "Ожидался один из двух CX-форматов:\n"
-                "1) Полный: Дата талона, ЭМК пациента, Название клиники, "
-                "Категория клиники, Регоион клиники, Тип респондента, Вопрос, Ответ, Опция ответа\n"
-                "2) Упрощенный: Дата талона, Название клиники, ЭМК пациента, "
-                "Тип респондента, Вопрос, Оценка, Комментарий\n\n"
+                "1) Полный: Дата талона, ЭМК пациента, Название клиники, Категория клиники, "
+                "Регоион клиники, Тип респондента, Вопрос, Ответ, Опция ответа\n"
+                "2) Упрощенный: Дата талона, Название клиники, ЭМК пациента, Тип респондента, "
+                "Вопрос, Оценка, Комментарий\n\n"
                 f"Фактические колонки: {list(df.columns)}"
             )
-    
-        # гарантируем наличие всех внутренних колонок
+
         required_internal = [
             "date", "patient_id", "clinic", "clinic_category", "clinic_region",
             "segment", "question", "answer", "answer_option", "score"
         ]
-    
+
         for col in required_internal:
             if col not in df.columns:
                 if col == "answer_option":
@@ -275,8 +291,7 @@ with tab1:
                     df[col] = "Не указано"
                 else:
                     df[col] = ""
-    
-        # типы
+
         df["date"] = pd.to_datetime(df["date"], errors="coerce", dayfirst=True)
         df["patient_id"] = df["patient_id"].astype(str).str.strip()
         df["clinic"] = df["clinic"].astype(str).str.strip()
@@ -286,13 +301,10 @@ with tab1:
         df["question"] = df["question"].astype(str).str.strip()
         df["answer"] = df["answer"].astype(str).str.strip()
         df["answer_option"] = df["answer_option"].astype(str).str.strip()
-    
-        # score аккуратно
         df["score"] = pd.to_numeric(df["score"], errors="coerce")
-    
+
         df = df[df["date"].notna()].copy()
-    
-        # нормализация сегментов: Detractor / Neutral / Promoter + русские варианты
+
         segment_map = {
             "detractor": "Критик",
             "neutral": "Нейтрал",
@@ -301,18 +313,16 @@ with tab1:
             "нейтрал": "Нейтрал",
             "промоутер": "Промоутер",
         }
-    
+
         df["segment"] = df["segment"].apply(
             lambda x: segment_map.get(str(x).strip().lower(), str(x).strip())
         )
-    
-        # комбинированный текст для LLM
+
         df["llm_text"] = df.apply(
             lambda row: build_llm_text(row["answer"], row["answer_option"]),
             axis=1
         )
-    
-        # календарные признаки
+
         iso = df["date"].dt.isocalendar()
         df["year"] = df["date"].dt.year
         df["month_num"] = df["date"].dt.month
@@ -320,13 +330,14 @@ with tab1:
         df["day"] = df["date"].dt.date.astype(str)
         df["iso_week"] = iso.week.astype(int)
         df["iso_year"] = iso.year.astype(int)
-        df["year_week"] = df["iso_year"].astype(str) + "-W" + df["iso_week"].astype(str).str.zfill(2)
-    
-        # полезный флаг для дебага / UI
+        df["year_week"] = (
+            df["iso_year"].astype(str) + "-W" + df["iso_week"].astype(str).str.zfill(2)
+        )
+
         df["source_schema"] = schema_type
-    
+
         return df
-        
+
     def ask_llm_json(prompt: str) -> dict:
         payload = {
             "model": MODEL,
@@ -352,6 +363,7 @@ with tab1:
         }
 
         r = requests.post(URL, headers=headers, json=payload, timeout=120)
+
         if r.status_code != 200:
             st.error(f"STATUS: {r.status_code}")
             st.error(r.text)
@@ -360,7 +372,6 @@ with tab1:
         data = r.json()
         content = data["message"]["content"].strip()
 
-        # пробуем вытащить JSON даже если модель слегка поплыла
         match = re.search(r"\{.*\}", content, re.S)
         if not match:
             return {
@@ -439,10 +450,6 @@ with tab1:
         return grp
 
     def patient_transition_analysis(df_neg: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        Смотрим последовательность сегментов по patient_id во времени.
-        Если у одного и того же id есть и Нейтрал, и Критик — считаем переходы.
-        """
         x = df_neg[["patient_id", "date", "clinic", "segment"]].copy()
         x = x.sort_values(["patient_id", "date"])
 
@@ -491,9 +498,6 @@ with tab1:
         question_limit: int = 8,
         sample_per_question: int = 20
     ) -> pd.DataFrame:
-        """
-        Собираем топ-вопросы по негативу и к ним текстовые комментарии.
-        """
         counts = (
             df_neg.groupby(["clinic", "question"])
             .size()
@@ -513,14 +517,16 @@ with tab1:
                 question = row["question"]
                 cnt = int(row["negative_count"])
 
-                comments = df_neg[
+                mask = (
                     (df_neg["clinic"] == clinic_name) &
-                    (df_neg["question"] == question) &
-                    (
-                        df_neg.apply(
-                            lambda x: is_meaningful_combined_text(x["answer"], x["answer_option"]),
-                            axis=1
-                        )
+                    (df_neg["question"] == question)
+                )
+
+                comments = df_neg.loc[mask].copy()
+                comments = comments[
+                    comments.apply(
+                        lambda x: is_meaningful_combined_text(x["answer"], x["answer_option"]),
+                        axis=1
                     )
                 ]["llm_text"].dropna().astype(str).tolist()
 
@@ -543,12 +549,12 @@ with tab1:
         sample_per_question: int = 15
     ) -> pd.DataFrame:
         if selected_clinic != "Все клиники":
-            df_work = df_neg[df_neg["clinic"] == selected_clinic].copy()
+            df_work_local = df_neg[df_neg["clinic"] == selected_clinic].copy()
         else:
-            df_work = df_neg.copy()
+            df_work_local = df_neg.copy()
 
         payload_df = build_root_cause_payload(
-            df_work,
+            df_work_local,
             clinic_scope=selected_clinic,
             question_limit=max_questions_per_clinic,
             sample_per_question=sample_per_question
@@ -558,6 +564,7 @@ with tab1:
 
         for clinic, sub in payload_df.groupby("clinic"):
             blocks = []
+
             for _, row in sub.iterrows():
                 if row["text_count"] == 0:
                     continue
@@ -623,7 +630,7 @@ with tab1:
 
         return pd.DataFrame(results)
 
-    def build_global_llm_summary(llm_df: pd.DataFrame):
+    def build_global_llm_summary(llm_df: pd.DataFrame) -> dict:
         if llm_df.empty:
             return {"management_summary": "Нет данных"}
 
@@ -690,7 +697,6 @@ with tab1:
         if df_neg.empty:
             return {"summary": "Нет данных"}
 
-        # 1. Сводка по вопросам и сегментам
         question_segment = (
             df_neg.groupby(["question", "segment"])
             .size()
@@ -705,7 +711,6 @@ with tab1:
             .sort_values("total_count", ascending=False)
         )
 
-        # 2. Берем тексты по каждому вопросу
         blocks = []
 
         for _, qrow in question_totals.iterrows():
@@ -717,18 +722,16 @@ with tab1:
                 [f"{r['segment']}: {int(r['count'])}" for _, r in seg_rows.iterrows()]
             )
 
-            texts = (
-                df_neg[
-                    df_neg.apply(
-                        lambda x: is_meaningful_combined_text(x["answer"], x["answer_option"]),
-                        axis=1
-                    )
-                    & (df_neg["question"] == q)
-                ]["llm_text"]
-                .dropna()
-                .astype(str)
-                .tolist()
-            )
+            texts = df_neg[
+                (df_neg["question"] == q)
+            ].copy()
+
+            texts = texts[
+                texts.apply(
+                    lambda x: is_meaningful_combined_text(x["answer"], x["answer_option"]),
+                    axis=1
+                )
+            ]["llm_text"].dropna().astype(str).tolist()
 
             if not texts:
                 continue
@@ -760,11 +763,11 @@ with tab1:
 Твоя задача: сделать ПОЛНОЦЕННЫЙ аналитический разбор, а не короткую выжимку.
 
 КРИТИЧЕСКИ ВАЖНЫЕ ПРАВИЛА:
-1. НЕЛЬЗЯ схлопывать всё в 1-2 общие темы типа "проблемы с приложением" или "организация приёма", если внутри есть разные самостоятельные проблемы.
+1. НЕЛЬЗЯ схлопывать всё в 1-2 общие темы, если внутри есть разные самостоятельные проблемы.
 2. Нужно выделять ОТДЕЛЬНЫЕ паттерны проблем внутри каждого вопроса.
-3. Если внутри одного вопроса есть 3 разные причины негатива — покажи все 3, а не одну общую.
+3. Если внутри одного вопроса есть 3 разные причины негатива — покажи все 3.
 4. Не теряй редкие, но устойчивые проблемы, если они повторяются в нескольких комментариях.
-5. Не пиши воду, не пересказывай все комментарии подряд.
+5. Не пиши воду.
 6. Не выдумывай причины, которых нет в текстах.
 7. Если проблема больше характерна для критиков — укажи это. Если больше для нейтралов — тоже укажи.
 8. Для каждой проблемы покажи:
@@ -773,13 +776,11 @@ with tab1:
    - кто чаще пишет: критики / нейтралы / смешанный сигнал
    - примерные текстовые паттерны / evidence
    - относительную значимость: high / medium / low
-   - примерный охват: сколько комментариев или какая доля комментариев по вопросу поддерживает этот паттерн
+   - примерный охват
 9. После детального разбора сделай итог:
    - какие вопросы дают основной негатив
    - какие проблемы наиболее системные
    - какие рекомендации следуют из данных
-
-НУЖЕН НЕ executive summary НА 3 СТРОКИ, А НОРМАЛЬНЫЙ АНАЛИЗ.
 
 Верни СТРОГО JSON следующего формата:
 {{
@@ -793,12 +794,9 @@ with tab1:
       }},
       "problems": [
         {{
-          "problem": "конкретная проблема, без общих слов",
+          "problem": "конкретная проблема",
           "dominant_segment": "Критик|Нейтрал|Смешанный",
-          "evidence_patterns": [
-            "краткий паттерн 1",
-            "краткий паттерн 2"
-          ],
+          "evidence_patterns": ["краткий паттерн 1", "краткий паттерн 2"],
           "impact": "high|medium|low",
           "coverage_estimate": "например: ~8 из 20 комментариев по вопросу"
         }}
@@ -807,7 +805,7 @@ with tab1:
   ],
   "cross_question_patterns": [
     {{
-      "pattern": "системная проблема, встречающаяся в нескольких вопросах",
+      "pattern": "системная проблема",
       "related_questions": ["вопрос 1", "вопрос 2"]
     }}
   ],
@@ -822,7 +820,7 @@ with tab1:
     "рекомендация 2",
     "рекомендация 3"
   ],
-  "management_summary": "развернутый, но компактный итоговый вывод по всему массиву"
+  "management_summary": "итоговый вывод"
 }}
 
 ДАННЫЕ:
@@ -898,7 +896,6 @@ with tab1:
 6. Не выдумывать ничего вне текста.
 
 Верни строго JSON:
-
 {{
   "question": "название вопроса",
   "summary": "краткий вывод по основной боли",
@@ -935,21 +932,18 @@ with tab1:
 
         if "question" not in parsed:
             parsed["question"] = selected_question
-
         if "top_answer_options" not in parsed:
             parsed["top_answer_options"] = option_stats.head(10).to_dict(orient="records")
-
         if "secondary_pains" not in parsed:
             parsed["secondary_pains"] = []
-
         if "operational_recommendations" not in parsed:
             parsed["operational_recommendations"] = []
 
         return parsed
 
-    # =========================================================
-    # UI для первой вкладки
-    # =========================================================
+    # =====================================================
+    # UI
+    # =====================================================
 
     st.header("📊 CX / NPS Root Cause Analytics")
 
@@ -967,6 +961,13 @@ with tab1:
             st.stop()
 
         st.success("Файл загружен")
+
+        if "source_schema" in df.columns and not df.empty:
+            schema_name = df["source_schema"].iloc[0]
+            if schema_name == "full":
+                st.info("Обнаружен формат CX: полный (Ответ + Опция ответа)")
+            elif schema_name == "comment":
+                st.info("Обнаружен формат CX: упрощенный (Комментарий без Опции ответа)")
 
         with st.expander("Проверка данных"):
             st.write("Колонки после нормализации:")
@@ -991,7 +992,6 @@ with tab1:
                 default=TARGET_SEGMENTS
             )
 
-        # базовый фильтр
         df_work = df.copy()
         df_work = df_work[df_work["segment"].isin(selected_segments)]
 
@@ -1002,9 +1002,9 @@ with tab1:
             st.warning("После фильтров данных не осталось.")
             st.stop()
 
-        # -----------------------------------------------------
+        # -------------------------------------------------
         # KPI
-        # -----------------------------------------------------
+        # -------------------------------------------------
         st.subheader("1. Общая картина")
 
         seg_sum = segment_summary(df_work)
@@ -1016,9 +1016,9 @@ with tab1:
 
         st.dataframe(seg_sum, use_container_width=True)
 
-        # -----------------------------------------------------
-        # Вопросы
-        # -----------------------------------------------------
+        # -------------------------------------------------
+        # Questions
+        # -------------------------------------------------
         st.subheader("2. Какие вопросы сильнее негативят")
 
         q_sum = question_summary(df_work)
@@ -1057,9 +1057,9 @@ with tab1:
 
         st.plotly_chart(fig_top, use_container_width=True)
 
-        # -----------------------------------------------------
+        # -------------------------------------------------
         # Timeline
-        # -----------------------------------------------------
+        # -------------------------------------------------
         st.subheader("3. Таймлайн")
 
         tl = timeline_summary(df_work, period_mode)
@@ -1078,9 +1078,9 @@ with tab1:
         st.plotly_chart(fig_tl, use_container_width=True)
         st.dataframe(tl, use_container_width=True)
 
-        # -----------------------------------------------------
-        # Drill-down by day for month
-        # -----------------------------------------------------
+        # -------------------------------------------------
+        # Day drill-down
+        # -------------------------------------------------
         if period_mode == "Месяц":
             st.subheader("4. Drill-down по дням внутри месяца")
 
@@ -1101,9 +1101,9 @@ with tab1:
             st.plotly_chart(fig_day, use_container_width=True)
             st.dataframe(day_df, use_container_width=True)
 
-        # -----------------------------------------------------
+        # -------------------------------------------------
         # Patient transitions
-        # -----------------------------------------------------
+        # -------------------------------------------------
         st.subheader("5. Динамика по ЭМК: меняется ли сегмент")
 
         patient_seq, patient_transitions = patient_transition_analysis(df_work)
@@ -1129,9 +1129,9 @@ with tab1:
                 use_container_width=True
             )
 
-            # -----------------------------------------------------
-            # LLM root cause extraction
-            # -----------------------------------------------------
+            # ---------------------------------------------
+            # LLM block
+            # ---------------------------------------------
             st.subheader("6. Root Cause Extraction по текстовым ответам")
 
             if "llm_df" not in st.session_state:
@@ -1147,7 +1147,10 @@ with tab1:
                 st.session_state.question_pain_result = None
 
             text_candidates = df_work[
-                df_work.apply(lambda x: is_meaningful_combined_text(x["answer"], x["answer_option"]), axis=1)
+                df_work.apply(
+                    lambda x: is_meaningful_combined_text(x["answer"], x["answer_option"]),
+                    axis=1
+                )
             ].copy()
 
             x1, x2, x3 = st.columns(3)
@@ -1172,7 +1175,6 @@ with tab1:
                 run_final = col3.button("Итог")
                 run_question_pain = col4.button("Боль по вопросу")
 
-                # ===== ROOT CAUSE =====
                 if run_llm:
                     with st.spinner("LLM..."):
                         st.session_state.llm_df = run_root_cause_llm(
@@ -1192,7 +1194,6 @@ with tab1:
                         parsed = json.loads(row["root_causes_json"])
                         st.dataframe(pd.DataFrame(parsed.get("root_causes", [])), use_container_width=True)
 
-                # ===== GLOBAL =====
                 if run_global and not llm_df.empty:
                     with st.spinner("LLM global..."):
                         st.session_state.global_summary = build_global_llm_summary(llm_df)
@@ -1201,7 +1202,6 @@ with tab1:
                     st.subheader("7. Сводка сети")
                     st.json(st.session_state.global_summary)
 
-                # ===== FINAL =====
                 if run_final:
                     with st.spinner("LLM final..."):
                         st.session_state.final_insight = build_final_llm_insight(text_candidates)
@@ -1225,7 +1225,6 @@ with tab1:
                     st.markdown("### Итог")
                     st.write(final.get("management_summary", ""))
 
-                # ===== QUESTION PAIN =====
                 if run_question_pain:
                     with st.spinner("LLM question pain..."):
                         st.session_state.question_pain_result = build_question_pain_analysis(
@@ -1262,9 +1261,9 @@ with tab1:
                         for r in recs:
                             st.write(f"- {r}")
 
-            # -----------------------------------------------------
+            # ---------------------------------------------
             # Export
-            # -----------------------------------------------------
+            # ---------------------------------------------
             st.subheader("10. Экспорт")
 
             export_dict = {
@@ -1310,6 +1309,7 @@ with tab1:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
 
+
 # =========================================================
 # TAB 2: PAIN MAP ML
 # =========================================================
@@ -1324,7 +1324,6 @@ with tab2:
     )
 
     if uploaded2:
-        # Импортируем ТОЛЬКО когда есть файл и пользователь готов работать
         try:
             from ml import predict_topics
             from logic import build_pain_matrix
@@ -1366,7 +1365,6 @@ with tab2:
 
                 st.success("Готово")
 
-                # === VISUAL ===
                 if pivots:
                     fig, axes = plt.subplots(1, len(pivots), figsize=(18, 6), sharey=True)
                     if len(pivots) == 1:
@@ -1383,7 +1381,6 @@ with tab2:
                     plt.colorbar(im, ax=axes)
                     st.pyplot(fig)
 
-                # === DOWNLOAD ===
                 export_dict_ml = {
                     "with_ml": df_ml,
                     "weekly_long": weekly
