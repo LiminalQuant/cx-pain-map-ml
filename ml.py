@@ -8,15 +8,8 @@ ENCODER_PATH = "model/nps_mlb.pkl"
 
 @st.cache_resource(show_spinner=False)
 def load_ml_artifacts():
-    try:
-        bundle = joblib.load(MODEL_PATH)
-        encoder = joblib.load(ENCODER_PATH)
-    except Exception as e:
-        raise RuntimeError(
-            f"Ошибка загрузки ML-артефактов. "
-            f"Скорее всего, model pickle несовместим с текущей версией transformers/sentence-transformers. "
-            f"Детали: {e}"
-        )
+    bundle = joblib.load(MODEL_PATH)
+    encoder = joblib.load(ENCODER_PATH)
 
     clf = bundle["clf"]
     embedder = bundle["embedder"]
