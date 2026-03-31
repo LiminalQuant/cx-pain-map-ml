@@ -1,17 +1,31 @@
 import joblib
 import pandas as pd
+import streamlit as st
 
 MODEL_PATH = "model/nps_sbert_model.pkl"
 ENCODER_PATH = "model/nps_mlb.pkl"
 
-bundle = joblib.load(MODEL_PATH)
-clf = bundle["clf"]
-embedder = bundle["embedder"]
 
-encoder = joblib.load(ENCODER_PATH)
+@st.cache_resource(show_spinner=False)
+def load_ml_artifacts():
+    try:
+        bundle = joblib.load(MODEL_PATH)
+        encoder = joblib.load(ENCODER_PATH)
+    except Exception as e:
+        raise RuntimeError(
+            f"Ошибка загрузки ML-артефактов. "
+            f"Скорее всего, model pickle несовместим с текущей версией transformers/sentence-transformers. "
+            f"Детали: {e}"
+        )
+
+    clf = bundle["clf"]
+    embedder = bundle["embedder"]
+    return clf, embedder, encoder
 
 
-def predict_topics(df, text_col):
+def predict_topics(df, text_col, threshold=0.5):
+    clf, embedder, encoder = load_ml_artifacts()
+
     texts = df[text_col].astype(str).fillna("").tolist()
 
     X = embedder.encode(
@@ -20,9 +34,7 @@ def predict_topics(df, text_col):
         show_progress_bar=False
     )
 
-    # multi-label → probabilities
     probs = clf.predict_proba(X)
-
     topic_cols = encoder.classes_
 
     prob_df = pd.DataFrame(
@@ -30,10 +42,7 @@ def predict_topics(df, text_col):
         columns=[f"prob_{t}" for t in topic_cols]
     )
 
-    # порог — можно вынести в UI
-    threshold = 0.5
     topics = []
-
     for row in probs:
         labels = [
             topic_cols[i]
