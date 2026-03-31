@@ -53,16 +53,26 @@ with tab1:
     # CONSTANTS
     # =========================================================
 
-    COLUMN_MAP = {
+    CX_SCHEMA_FULL = {
+    "Дата талона": "date",
+    "ЭМК пациента": "patient_id",
+    "Название клиники": "clinic",
+    "Категория клиники": "clinic_category",
+    "Регоион клиники": "clinic_region",
+    "Тип респондента": "segment",
+    "Вопрос": "question",
+    "Ответ": "answer",
+    "Опция ответа": "answer_option",
+    }
+    
+    CX_SCHEMA_COMMENT = {
         "Дата талона": "date",
         "ЭМК пациента": "patient_id",
         "Название клиники": "clinic",
-        "Категория клиники": "clinic_category",
-        "Регоион клиники": "clinic_region",
         "Тип респондента": "segment",
         "Вопрос": "question",
-        "Ответ": "answer",
-        "Опция ответа": "answer_option",
+        "Оценка": "score",
+        "Комментарий": "answer",
     }
 
     TARGET_SEGMENTS = ["Критик", "Нейтрал"]
@@ -70,7 +80,20 @@ with tab1:
     # =========================================================
     # HELPERS
     # =========================================================
+    def detect_cx_schema(df: pd.DataFrame) -> str:
+    cols = set(df.columns.astype(str).str.strip())
 
+    full_required = set(CX_SCHEMA_FULL.keys())
+    comment_required = set(CX_SCHEMA_COMMENT.keys())
+
+    if full_required.issubset(cols):
+        return "full"
+
+    if comment_required.issubset(cols):
+        return "comment"
+
+    return "unknown"
+    
     def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
         df.columns = (
@@ -92,15 +115,15 @@ with tab1:
     def build_llm_text(answer: str, answer_option: str) -> str:
         answer = clean_text_for_llm(answer)
         answer_option = clean_text_for_llm(answer_option)
-
+    
         parts = []
-
-        if answer_option and answer_option.lower() not in {"-", "без ответа"}:
+    
+        if answer_option and answer_option.lower() not in {"-", "без ответа", "nan", "none"}:
             parts.append(f"Опция ответа: {answer_option}")
-
-        if answer and answer.lower() not in {"-", "без ответа"}:
+    
+        if answer and answer.lower() not in {"-", "без ответа", "nan", "none"}:
             parts.append(f"Комментарий: {answer}")
-
+    
         return "\n".join(parts).strip()
 
     def is_meaningful_text(value: str) -> bool:
@@ -172,30 +195,89 @@ with tab1:
 
     def load_file(uploaded_file) -> pd.DataFrame:
         """
-        В твоем файле первая строка пустая, значит header=1.
-        Плюс выкидываем Unnamed-мусор.
+        Поддержка двух CX-схем:
+        1) Полная:
+           Дата талона / ЭМК пациента / Название клиники / Категория клиники /
+           Регоион клиники / Тип респондента / Вопрос / Ответ / Опция ответа
+    
+        2) Упрощенная:
+           Дата талона / Название клиники / ЭМК пациента / Тип респондента /
+           Вопрос / Оценка / Комментарий
+    
+        На выходе всегда получаем унифицированные поля:
+        date, patient_id, clinic, clinic_category, clinic_region,
+        segment, question, answer, answer_option, score, llm_text
         """
         if uploaded_file.name.lower().endswith(".csv"):
             df = pd.read_csv(uploaded_file)
         else:
-            df = pd.read_excel(uploaded_file, header=1)
-
+            try:
+                df = pd.read_excel(uploaded_file, header=1)
+                df = normalize_columns(df)
+                if len(df.columns) <= 2:
+                    uploaded_file.seek(0)
+                    df = pd.read_excel(uploaded_file, header=0)
+            except Exception:
+                uploaded_file.seek(0)
+                df = pd.read_excel(uploaded_file, header=0)
+    
         df = normalize_columns(df)
-
+    
         # убрать мусорные unnamed-колонки
         df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False, regex=True)]
-
-        missing = [c for c in COLUMN_MAP if c not in df.columns]
-        if missing:
+    
+        schema_type = detect_cx_schema(df)
+    
+        if schema_type == "full":
+            df = df.rename(columns=CX_SCHEMA_FULL)
+    
+            # если score нет в старой схеме — просто добавим пустым
+            if "score" not in df.columns:
+                df["score"] = pd.NA
+    
+        elif schema_type == "comment":
+            df = df.rename(columns=CX_SCHEMA_COMMENT)
+    
+            # дополняем отсутствующие поля, чтобы пайп не ломался
+            if "clinic_category" not in df.columns:
+                df["clinic_category"] = "Не указано"
+    
+            if "clinic_region" not in df.columns:
+                df["clinic_region"] = "Не указано"
+    
+            if "answer_option" not in df.columns:
+                df["answer_option"] = ""
+    
+        else:
             raise ValueError(
-                f"Не найдены обязательные колонки: {missing}\n"
+                "Формат файла не распознан.\n\n"
+                "Ожидался один из двух CX-форматов:\n"
+                "1) Полный: Дата талона, ЭМК пациента, Название клиники, "
+                "Категория клиники, Регоион клиники, Тип респондента, Вопрос, Ответ, Опция ответа\n"
+                "2) Упрощенный: Дата талона, Название клиники, ЭМК пациента, "
+                "Тип респондента, Вопрос, Оценка, Комментарий\n\n"
                 f"Фактические колонки: {list(df.columns)}"
             )
-
-        df = df.rename(columns=COLUMN_MAP)
-
+    
+        # гарантируем наличие всех внутренних колонок
+        required_internal = [
+            "date", "patient_id", "clinic", "clinic_category", "clinic_region",
+            "segment", "question", "answer", "answer_option", "score"
+        ]
+    
+        for col in required_internal:
+            if col not in df.columns:
+                if col == "answer_option":
+                    df[col] = ""
+                elif col == "score":
+                    df[col] = pd.NA
+                elif col in ["clinic_category", "clinic_region"]:
+                    df[col] = "Не указано"
+                else:
+                    df[col] = ""
+    
         # типы
-        df["date"] = pd.to_datetime(df["date"], errors="coerce")
+        df["date"] = pd.to_datetime(df["date"], errors="coerce", dayfirst=True)
         df["patient_id"] = df["patient_id"].astype(str).str.strip()
         df["clinic"] = df["clinic"].astype(str).str.strip()
         df["clinic_category"] = df["clinic_category"].astype(str).str.strip()
@@ -204,15 +286,32 @@ with tab1:
         df["question"] = df["question"].astype(str).str.strip()
         df["answer"] = df["answer"].astype(str).str.strip()
         df["answer_option"] = df["answer_option"].astype(str).str.strip()
-
+    
+        # score аккуратно
+        df["score"] = pd.to_numeric(df["score"], errors="coerce")
+    
         df = df[df["date"].notna()].copy()
-
+    
+        # нормализация сегментов: Detractor / Neutral / Promoter + русские варианты
+        segment_map = {
+            "detractor": "Критик",
+            "neutral": "Нейтрал",
+            "promoter": "Промоутер",
+            "критик": "Критик",
+            "нейтрал": "Нейтрал",
+            "промоутер": "Промоутер",
+        }
+    
+        df["segment"] = df["segment"].apply(
+            lambda x: segment_map.get(str(x).strip().lower(), str(x).strip())
+        )
+    
         # комбинированный текст для LLM
         df["llm_text"] = df.apply(
             lambda row: build_llm_text(row["answer"], row["answer_option"]),
             axis=1
         )
-
+    
         # календарные признаки
         iso = df["date"].dt.isocalendar()
         df["year"] = df["date"].dt.year
@@ -222,9 +321,12 @@ with tab1:
         df["iso_week"] = iso.week.astype(int)
         df["iso_year"] = iso.year.astype(int)
         df["year_week"] = df["iso_year"].astype(str) + "-W" + df["iso_week"].astype(str).str.zfill(2)
-
+    
+        # полезный флаг для дебага / UI
+        df["source_schema"] = schema_type
+    
         return df
-
+        
     def ask_llm_json(prompt: str) -> dict:
         payload = {
             "model": MODEL,
