@@ -1315,7 +1315,7 @@ with tab1:
 # =========================================================
 
 with tab2:
-    st.header("🎯 CX Pain Map — ML driven")
+    st.header("🎯 CX Pain Map — LLM driven")
 
     uploaded2 = st.file_uploader(
         "Загрузите файл (xlsx / csv)",
@@ -1327,13 +1327,12 @@ with tab2:
         try:
             from ml import predict_topics
             from logic import build_pain_matrix
-            ml_available = True
+            llm_topicing_available = True
         except Exception as e:
-            st.error(f"Ошибка загрузки ML модулей: {e}")
-            st.info("Проверьте файлы ml.py и logic.py")
-            ml_available = False
+            st.error(f"Ошибка загрузки LLM-модулей: {e}")
+            llm_topicing_available = False
 
-        if ml_available:
+        if llm_topicing_available:
             if uploaded2.name.endswith(".xlsx"):
                 df2 = pd.read_excel(uploaded2)
             else:
@@ -1345,55 +1344,63 @@ with tab2:
             date_col = st.selectbox("Колонка с датой", df2.columns, key="date_col")
             segment_col = st.selectbox("Колонка с типом респондента", df2.columns, key="segment_col")
 
-            threshold = st.slider(
-                "Порог вероятности темы",
-                0.1, 0.9, 0.5, 0.05,
-                key="threshold"
+            st.info(
+                "Темы определяются LLM по тексту комментариев. "
+                "Текущий режим — тестовый, без локальной ML-модели."
             )
 
-            if st.button("▶ Определить темы и построить pain-map", key="run_ml"):
-                with st.spinner("ML-классификация..."):
-                    df_ml = predict_topics(df2, text_col)
+            if st.button("▶ Определить темы и построить pain-map", key="run_llm_topics"):
+                try:
+                    with st.spinner("LLM-классификация тем..."):
+                        df_ml = predict_topics(df2, text_col)
 
-                weekly, pivots = build_pain_matrix(
-                    df_ml,
-                    date_col=date_col,
-                    topic_col="ml_topics",
-                    segment_col=segment_col,
-                    text_col=text_col
-                )
+                    weekly, pivots = build_pain_matrix(
+                        df_ml,
+                        date_col=date_col,
+                        topic_col="ml_topics",
+                        segment_col=segment_col,
+                        text_col=text_col
+                    )
 
-                st.success("Готово")
+                    st.success("Готово")
 
-                if pivots:
-                    fig, axes = plt.subplots(1, len(pivots), figsize=(18, 6), sharey=True)
-                    if len(pivots) == 1:
-                        axes = [axes]
+                    st.subheader("Результат классификации")
+                    preview_cols = [c for c in [date_col, segment_col, text_col, "ml_topics"] if c in df_ml.columns]
+                    st.dataframe(df_ml[preview_cols].head(50), use_container_width=True)
 
-                    for ax, (seg, pv) in zip(axes, pivots.items()):
-                        im = ax.imshow(pv.T.values, aspect="auto", cmap="Reds")
-                        ax.set_title(seg)
-                        ax.set_xticks(range(len(pv.index)))
-                        ax.set_xticklabels(pv.index, rotation=45, ha="right")
-                        ax.set_yticks(range(len(pv.columns)))
-                        ax.set_yticklabels(pv.columns)
+                    if pivots:
+                        fig, axes = plt.subplots(1, len(pivots), figsize=(18, 6), sharey=True)
+                        if len(pivots) == 1:
+                            axes = [axes]
 
-                    plt.colorbar(im, ax=axes)
-                    st.pyplot(fig)
+                        for ax, (seg, pv) in zip(axes, pivots.items()):
+                            im = ax.imshow(pv.T.values, aspect="auto", cmap="Reds")
+                            ax.set_title(seg)
+                            ax.set_xticks(range(len(pv.index)))
+                            ax.set_xticklabels(pv.index, rotation=45, ha="right")
+                            ax.set_yticks(range(len(pv.columns)))
+                            ax.set_yticklabels(pv.columns)
 
-                export_dict_ml = {
-                    "with_ml": df_ml,
-                    "weekly_long": weekly
-                }
+                        plt.colorbar(im, ax=axes)
+                        st.pyplot(fig)
 
-                for seg, pv in pivots.items():
-                    export_dict_ml[f"counts_{seg}"] = pv
+                    export_dict_ml = {
+                        "with_llm_topics": df_ml,
+                        "weekly_long": weekly
+                    }
 
-                excel_bytes_ml = to_excel_bytes(export_dict_ml)
+                    for seg, pv in pivots.items():
+                        export_dict_ml[f"counts_{seg}"] = pv
 
-                st.download_button(
-                    "⬇️ Скачать Excel",
-                    data=excel_bytes_ml,
-                    file_name="pain_map.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                    excel_bytes_ml = to_excel_bytes(export_dict_ml)
+
+                    st.download_button(
+                        "⬇️ Скачать Excel",
+                        data=excel_bytes_ml,
+                        file_name="pain_map_llm.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+
+                except Exception as e:
+                    st.error("Ошибка при LLM-классификации.")
+                    st.code(str(e))
