@@ -1,6 +1,7 @@
 import pandas as pd
 from dateutil import parser
 
+
 def parse_date(val):
     if pd.isna(val):
         return pd.NaT
@@ -43,11 +44,15 @@ def build_pain_matrix(
     rows = []
 
     for _, r in df.iterrows():
-        if r.get(segment_col) not in segments:
+        seg_value = str(r.get(segment_col, "")).strip()
+
+        if seg_value not in segments:
             continue
-        if pd.isna(r[topic_col]) or str(r[topic_col]).strip() == "":
+
+        if pd.isna(r.get(topic_col)) or str(r.get(topic_col)).strip() == "":
             continue
-        if pd.isna(r["week"]):
+
+        if pd.isna(r.get("bill_date")):
             continue
 
         topics = {
@@ -60,10 +65,19 @@ def build_pain_matrix(
             rows.append({
                 "week": r["week"],
                 "topic": t,
-                "segment": r[segment_col]
+                "segment": seg_value
             })
 
-    pain = pd.DataFrame(rows)
+    # --- если после всех фильтров ничего не осталось ---
+    if not rows:
+        empty_weekly = pd.DataFrame(columns=["week", "topic", "segment", "count"])
+        empty_pivots = {
+            seg: pd.DataFrame()
+            for seg in segments
+        }
+        return empty_weekly, empty_pivots
+
+    pain = pd.DataFrame(rows, columns=["week", "topic", "segment"])
 
     weekly = (
         pain
@@ -72,15 +86,18 @@ def build_pain_matrix(
         .reset_index(name="count")
     )
 
-    pivots = {
-        seg: (
-            weekly[weekly["segment"] == seg]
-            .pivot(index="week", columns="topic", values="count")
-            .fillna(0)
-            .sort_index()
-        )
-        for seg in segments
-    }
+    pivots = {}
+    for seg in segments:
+        seg_df = weekly[weekly["segment"] == seg].copy()
+
+        if seg_df.empty:
+            pivots[seg] = pd.DataFrame()
+        else:
+            pivots[seg] = (
+                seg_df
+                .pivot(index="week", columns="topic", values="count")
+                .fillna(0)
+                .sort_index()
+            )
 
     return weekly, pivots
-
