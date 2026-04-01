@@ -1317,6 +1317,123 @@ with tab1:
 with tab2:
     st.header("🎯 CX Pain Map — LLM driven")
 
+    def parse_date_safe(val):
+        try:
+            return pd.to_datetime(val, errors="coerce", dayfirst=True)
+        except Exception:
+            return pd.NaT
+
+    def normalize_segment_value(x):
+        if pd.isna(x):
+            return ""
+        s = str(x).strip()
+        mapping = {
+            "Detractor": "Detractor",
+            "Promoter": "Promoter",
+            "Neutral": "Neutral",
+            "Netral": "Netral",
+            "Критик": "Detractor",
+            "Нейтрал": "Neutral",
+            "Промоутер": "Promoter",
+        }
+        return mapping.get(s, s)
+
+    def build_pain_matrix_inline(
+        df,
+        date_col,
+        topic_col,
+        segment_col,
+        text_col,
+        selected_segments
+    ):
+        work = df.copy()
+
+        # текст
+        work["_comment_norm"] = (
+            work[text_col]
+            .astype(str)
+            .fillna("")
+            .str.strip()
+            .str.lower()
+            .str.replace("\n", " ", regex=False)
+        )
+
+        work = work[work["_comment_norm"] != ""].copy()
+
+        if work.empty:
+            empty_weekly = pd.DataFrame(columns=["week", "topic", "segment", "count"])
+            return empty_weekly, {}
+
+        # дата
+        work["bill_date"] = work[date_col].apply(parse_date_safe)
+        work = work[work["bill_date"].notna()].copy()
+
+        if work.empty:
+            empty_weekly = pd.DataFrame(columns=["week", "topic", "segment", "count"])
+            return empty_weekly, {}
+
+        work["week"] = work["bill_date"].dt.to_period("W").astype(str)
+
+        # сегменты
+        work["_segment_norm"] = work[segment_col].apply(normalize_segment_value)
+        selected_segments = [normalize_segment_value(x) for x in selected_segments]
+
+        work = work[work["_segment_norm"].isin(selected_segments)].copy()
+
+        if work.empty:
+            empty_weekly = pd.DataFrame(columns=["week", "topic", "segment", "count"])
+            return empty_weekly, {}
+
+        # дубликаты комментариев
+        work = work.sort_values("bill_date")
+        work = work.drop_duplicates(subset=["_comment_norm"], keep="first")
+
+        rows = []
+
+        for _, r in work.iterrows():
+            raw_topics = str(r.get(topic_col, "")).strip()
+            if not raw_topics:
+                continue
+
+            topics = [t.strip() for t in raw_topics.split(",") if t.strip()]
+            if not topics:
+                continue
+
+            for t in topics:
+                rows.append({
+                    "week": r["week"],
+                    "topic": t,
+                    "segment": r["_segment_norm"]
+                })
+
+        if not rows:
+            empty_weekly = pd.DataFrame(columns=["week", "topic", "segment", "count"])
+            return empty_weekly, {}
+
+        pain = pd.DataFrame(rows, columns=["week", "topic", "segment"])
+
+        weekly = (
+            pain.groupby(["week", "topic", "segment"])
+            .size()
+            .reset_index(name="count")
+            .sort_values(["week", "topic", "segment"])
+        )
+
+        pivots = {}
+        for seg in selected_segments:
+            seg_df = weekly[weekly["segment"] == seg].copy()
+            if seg_df.empty:
+                continue
+
+            pv = (
+                seg_df.pivot(index="week", columns="topic", values="count")
+                .fillna(0)
+                .sort_index()
+            )
+            pivots[seg] = pv
+
+        return weekly, pivots
+
     uploaded2 = st.file_uploader(
         "Загрузите файл (xlsx / csv)",
         type=["xlsx", "csv"],
@@ -1326,10 +1443,9 @@ with tab2:
     if uploaded2:
         try:
             from ml import predict_topics
-            from logic import build_pain_matrix
             llm_topicing_available = True
         except Exception as e:
-            st.error(f"Ошибка загрузки LLM-модулей: {e}")
+            st.error(f"Ошибка загрузки LLM-модуля: {e}")
             llm_topicing_available = False
 
         if llm_topicing_available:
@@ -1344,6 +1460,28 @@ with tab2:
             date_col = st.selectbox("Колонка с датой", df2.columns, key="date_col")
             segment_col = st.selectbox("Колонка с типом респондента", df2.columns, key="segment_col")
 
+            available_segments_raw = (
+                df2[segment_col]
+                .astype(str)
+                .fillna("")
+                .str.strip()
+                .unique()
+                .tolist()
+            )
+            available_segments_raw = [x for x in available_segments_raw if x]
+            available_segments_raw = sorted(available_segments_raw)
+
+            default_segments = [x for x in available_segments_raw if x in ["Detractor", "Netral", "Neutral", "Критик", "Нейтрал"]]
+            if not default_segments and available_segments_raw:
+                default_segments = available_segments_raw[:2]
+
+            selected_ml_segments = st.multiselect(
+                "Какие сегменты включать в pain-map",
+                options=available_segments_raw,
+                default=default_segments,
+                key="selected_ml_segments"
+            )
+
             st.info(
                 "Темы определяются LLM по тексту комментариев. "
                 "Текущий режим — тестовый, без локальной ML-модели."
@@ -1354,53 +1492,81 @@ with tab2:
                     with st.spinner("LLM-классификация тем..."):
                         df_ml = predict_topics(df2, text_col)
 
-                    weekly, pivots = build_pain_matrix(
+                    preview_cols = [c for c in [date_col, segment_col, text_col, "ml_topics"] if c in df_ml.columns]
+
+                    st.subheader("Результат классификации")
+                    st.dataframe(df_ml[preview_cols].head(50), use_container_width=True)
+
+                    weekly, pivots = build_pain_matrix_inline(
                         df_ml,
                         date_col=date_col,
                         topic_col="ml_topics",
                         segment_col=segment_col,
-                        text_col=text_col
+                        text_col=text_col,
+                        selected_segments=selected_ml_segments
                     )
 
-                    st.success("Готово")
+                    if weekly.empty:
+                        st.warning(
+                            "После фильтрации не осталось данных для pain-map. "
+                            "Обычно это значит одно из трех: "
+                            "1) LLM не присвоила темы, "
+                            "2) выбранные сегменты не совпали с данными, "
+                            "3) даты не распарсились."
+                        )
 
-                    st.subheader("Результат классификации")
-                    preview_cols = [c for c in [date_col, segment_col, text_col, "ml_topics"] if c in df_ml.columns]
-                    st.dataframe(df_ml[preview_cols].head(50), use_container_width=True)
+                        st.markdown("### Быстрая проверка")
+                        debug_df = df_ml.copy()
+                        debug_df["_segment_debug"] = debug_df[segment_col].astype(str).str.strip()
+                        if date_col in debug_df.columns:
+                            debug_df["_date_debug"] = pd.to_datetime(debug_df[date_col], errors="coerce", dayfirst=True)
+                        st.dataframe(
+                            debug_df[[c for c in preview_cols + ["_segment_debug", "_date_debug"] if c in debug_df.columns]].head(50),
+                            use_container_width=True
+                        )
+                    else:
+                        st.success("Готово")
 
-                    if pivots:
-                        fig, axes = plt.subplots(1, len(pivots), figsize=(18, 6), sharey=True)
-                        if len(pivots) == 1:
-                            axes = [axes]
+                        st.markdown("### Weekly long")
+                        st.dataframe(weekly, use_container_width=True)
 
-                        for ax, (seg, pv) in zip(axes, pivots.items()):
-                            im = ax.imshow(pv.T.values, aspect="auto", cmap="Reds")
-                            ax.set_title(seg)
-                            ax.set_xticks(range(len(pv.index)))
-                            ax.set_xticklabels(pv.index, rotation=45, ha="right")
-                            ax.set_yticks(range(len(pv.columns)))
-                            ax.set_yticklabels(pv.columns)
+                        non_empty_pivots = {k: v for k, v in pivots.items() if not v.empty}
 
-                        plt.colorbar(im, ax=axes)
-                        st.pyplot(fig)
+                        if non_empty_pivots:
+                            fig, axes = plt.subplots(1, len(non_empty_pivots), figsize=(18, 6), sharey=True)
+                            if len(non_empty_pivots) == 1:
+                                axes = [axes]
 
-                    export_dict_ml = {
-                        "with_llm_topics": df_ml,
-                        "weekly_long": weekly
-                    }
+                            for ax, (seg, pv) in zip(axes, non_empty_pivots.items()):
+                                im = ax.imshow(pv.T.values, aspect="auto", cmap="Reds")
+                                ax.set_title(seg)
+                                ax.set_xticks(range(len(pv.index)))
+                                ax.set_xticklabels(pv.index, rotation=45, ha="right")
+                                ax.set_yticks(range(len(pv.columns)))
+                                ax.set_yticklabels(pv.columns)
 
-                    for seg, pv in pivots.items():
-                        export_dict_ml[f"counts_{seg}"] = pv
+                            plt.colorbar(im, ax=axes)
+                            st.pyplot(fig)
+                        else:
+                            st.info("Есть weekly-данные, но после разреза по сегментам пусто.")
 
-                    excel_bytes_ml = to_excel_bytes(export_dict_ml)
+                        export_dict_ml = {
+                            "with_llm_topics": df_ml,
+                            "weekly_long": weekly
+                        }
 
-                    st.download_button(
-                        "⬇️ Скачать Excel",
-                        data=excel_bytes_ml,
-                        file_name="pain_map_llm.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
+                        for seg, pv in non_empty_pivots.items():
+                            export_dict_ml[f"counts_{seg}"] = pv.reset_index()
+
+                        excel_bytes_ml = to_excel_bytes(export_dict_ml)
+
+                        st.download_button(
+                            "⬇️ Скачать Excel",
+                            data=excel_bytes_ml,
+                            file_name="pain_map_llm.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
 
                 except Exception as e:
                     st.error("Ошибка при LLM-классификации.")
-                    st.code(str(e))
+                    st.code(repr(e))
