@@ -25,7 +25,7 @@ st.set_page_config(
 # TABS
 # =========================================================
 
-tab1, tab2 = st.tabs(["📊 Root Cause Analytics", "🎯 Pain Map ML"])
+tab1, tab2, tab3 = st.tabs(["📊 Root Cause Analytics", "🎯 Pain Map ML", "🧾 CRM Feedback"])
 
 # =========================================================
 # COMMON HELPERS
@@ -1570,3 +1570,751 @@ with tab2:
                 except Exception as e:
                     st.error("Ошибка при LLM-классификации.")
                     st.code(repr(e))
+# =========================================================
+# TAB 3: CRM FEEDBACK LAYER
+# =========================================================
+
+with tab3:
+    st.header("🧾 CRM Feedback — LLM driven")
+    st.caption(
+        "CRM-слой не заменяет NPS. Он добавляет второй контур: "
+        "реальные обращения пациентов, статусы, каналы, категории и операционные боли."
+    )
+
+    CRM_NONE = "— не использовать —"
+
+    # -----------------------------------------------------
+    # CRM helpers
+    # -----------------------------------------------------
+
+    def crm_normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        df.columns = (
+            df.columns.astype(str)
+            .str.replace("\xa0", " ", regex=False)
+            .str.replace(r"\s+", " ", regex=True)
+            .str.strip()
+        )
+        return df
+
+    def crm_read_uploaded_table(uploaded_file) -> pd.DataFrame:
+        file_name = uploaded_file.name.lower()
+
+        if file_name.endswith(".csv"):
+            uploaded_file.seek(0)
+            return crm_normalize_columns(pd.read_csv(uploaded_file))
+
+        uploaded_file.seek(0)
+        df = pd.read_excel(uploaded_file)
+        df = crm_normalize_columns(df)
+        df = df.loc[:, ~df.columns.str.contains(r"^Unnamed", case=False, regex=True)]
+        return df
+
+    def crm_clean_text(value) -> str:
+        if value is None:
+            return ""
+
+        text = str(value).strip()
+        if text.lower() in {"nan", "none", "null", "nat"}:
+            return ""
+
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+    def crm_is_meaningful_text(value: str) -> bool:
+        text = crm_clean_text(value)
+        if not text:
+            return False
+
+        low = text.lower()
+        trash = {
+            "да", "нет", "ок", "норм", "норма", "хорошо", "спасибо",
+            "отлично", "плохо", "ужас", "без комментариев", "комментариев нет"
+        }
+
+        if low in trash:
+            return False
+
+        if re.fullmatch(r"[-+]?\d+([.,]\d+)?", text):
+            return False
+
+        words = re.findall(r"\w+", low, flags=re.UNICODE)
+
+        if len(words) < 2:
+            return False
+
+        if len(text) < 10:
+            return False
+
+        return True
+
+    def crm_optional_series(df: pd.DataFrame, col: str | None, default_value: str = "Не указано") -> pd.Series:
+        if not col or col == CRM_NONE:
+            return pd.Series([default_value] * len(df), index=df.index)
+
+        return (
+            df[col]
+            .astype(str)
+            .fillna(default_value)
+            .map(crm_clean_text)
+            .replace("", default_value)
+        )
+
+    def crm_prepare_feedback(
+        raw_df: pd.DataFrame,
+        date_col: str,
+        text_col: str,
+        clinic_col: str | None = None,
+        channel_col: str | None = None,
+        status_col: str | None = None,
+        category_col: str | None = None,
+        responsible_col: str | None = None,
+        patient_col: str | None = None,
+        ticket_col: str | None = None,
+    ) -> pd.DataFrame:
+        work = raw_df.copy()
+
+        out = pd.DataFrame(index=work.index)
+        out["date"] = pd.to_datetime(work[date_col], errors="coerce", dayfirst=True)
+        out["text"] = work[text_col].map(crm_clean_text)
+
+        out["clinic"] = crm_optional_series(work, clinic_col)
+        out["channel"] = crm_optional_series(work, channel_col)
+        out["status"] = crm_optional_series(work, status_col)
+        out["crm_category"] = crm_optional_series(work, category_col)
+        out["responsible_block"] = crm_optional_series(work, responsible_col)
+        out["patient_id"] = crm_optional_series(work, patient_col, default_value="")
+        out["ticket_id"] = crm_optional_series(work, ticket_col, default_value="")
+
+        out["source"] = "CRM"
+        out["segment"] = "CRM"
+
+        out = out[out["date"].notna()].copy()
+        out = out[out["text"].apply(crm_is_meaningful_text)].copy()
+
+        iso = out["date"].dt.isocalendar()
+        out["year"] = out["date"].dt.year
+        out["month_num"] = out["date"].dt.month
+        out["month_name"] = out["date"].dt.strftime("%Y-%m")
+        out["day"] = out["date"].dt.date.astype(str)
+        out["iso_week"] = iso.week.astype(int)
+        out["iso_year"] = iso.year.astype(int)
+        out["year_week"] = (
+            out["iso_year"].astype(str) + "-W" + out["iso_week"].astype(str).str.zfill(2)
+        )
+
+        return out.reset_index(drop=True)
+
+    def crm_value_counts(df: pd.DataFrame, col: str, name: str = "count") -> pd.DataFrame:
+        if df.empty or col not in df.columns:
+            return pd.DataFrame(columns=[col, name])
+
+        return (
+            df.groupby(col)
+            .size()
+            .reset_index(name=name)
+            .sort_values(name, ascending=False)
+        )
+
+    def crm_timeline_summary(df: pd.DataFrame, freq: str) -> pd.DataFrame:
+        if df.empty:
+            return pd.DataFrame(columns=["period", "count"])
+
+        time_col = "year_week" if freq == "Неделя" else "month_name"
+
+        return (
+            df.groupby(time_col)
+            .size()
+            .reset_index(name="count")
+            .rename(columns={time_col: "period"})
+            .sort_values("period")
+        )
+
+    def crm_group_timeline(df: pd.DataFrame, group_col: str, freq: str) -> pd.DataFrame:
+        if df.empty:
+            return pd.DataFrame(columns=["period", group_col, "count"])
+
+        time_col = "year_week" if freq == "Неделя" else "month_name"
+
+        return (
+            df.groupby([time_col, group_col])
+            .size()
+            .reset_index(name="count")
+            .rename(columns={time_col: "period"})
+            .sort_values(["period", group_col])
+        )
+
+    def crm_extract_json(content: str) -> dict:
+        content = str(content).strip()
+
+        match = re.search(r"\{.*\}", content, re.S)
+        if not match:
+            return {
+                "management_summary": "LLM не вернула валидный JSON",
+                "raw_response": content[:2000],
+                "pain_categories": [],
+                "root_causes": [],
+                "priority_actions": []
+            }
+
+        try:
+            return json.loads(match.group())
+        except Exception:
+            return {
+                "management_summary": "Не удалось распарсить JSON",
+                "raw_response": content[:2000],
+                "pain_categories": [],
+                "root_causes": [],
+                "priority_actions": []
+            }
+
+    def ask_crm_llm_json(prompt: str) -> dict:
+        payload = {
+            "model": MODEL,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Ты сильный CX-аналитик и операционный аналитик сети клиник. "
+                        "Работаешь с CRM-обращениями пациентов. "
+                        "Отвечай строго JSON без markdown и без пояснений вне JSON."
+                    )
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "stream": False
+        }
+
+        headers = {
+            "Authorization": f"Bearer {API_KEY}",
+            "Content-Type": "application/json"
+        }
+
+        r = requests.post(URL, headers=headers, json=payload, timeout=180)
+
+        if r.status_code != 200:
+            st.error(f"STATUS: {r.status_code}")
+            st.error(r.text)
+            raise Exception("CRM LLM request failed")
+
+        data = r.json()
+        content = data["message"]["content"].strip()
+        return crm_extract_json(content)
+
+    def crm_build_text_sample(df: pd.DataFrame, sample_size: int = 120) -> str:
+        sample = df.copy()
+        sample = sample.sort_values("date", ascending=False).head(sample_size)
+
+        rows = []
+
+        for i, row in sample.iterrows():
+            rows.append(
+                {
+                    "date": str(row.get("date", ""))[:10],
+                    "clinic": row.get("clinic", ""),
+                    "channel": row.get("channel", ""),
+                    "status": row.get("status", ""),
+                    "category": row.get("crm_category", ""),
+                    "responsible_block": row.get("responsible_block", ""),
+                    "text": row.get("text", "")
+                }
+            )
+
+        return json.dumps(rows, ensure_ascii=False)
+
+    def crm_build_stats_block(df: pd.DataFrame) -> str:
+        total = len(df)
+        period_min = df["date"].min()
+        period_max = df["date"].max()
+
+        def compact_counts(col: str, limit: int = 10) -> list[dict]:
+            if col not in df.columns:
+                return []
+            return crm_value_counts(df, col).head(limit).to_dict(orient="records")
+
+        stats = {
+            "total_crm_records": total,
+            "period_from": str(period_min.date()) if pd.notna(period_min) else "",
+            "period_to": str(period_max.date()) if pd.notna(period_max) else "",
+            "top_clinics": compact_counts("clinic"),
+            "top_channels": compact_counts("channel"),
+            "top_statuses": compact_counts("status"),
+            "top_crm_categories": compact_counts("crm_category"),
+            "top_responsible_blocks": compact_counts("responsible_block"),
+        }
+
+        return json.dumps(stats, ensure_ascii=False, indent=2)
+
+    def run_crm_root_cause_llm(
+        df_crm: pd.DataFrame,
+        analysis_scope: str,
+        selected_value: str,
+        sample_size: int = 120
+    ) -> dict:
+        work = df_crm.copy()
+
+        scope_map = {
+            "Вся CRM": None,
+            "Клиника": "clinic",
+            "Канал": "channel",
+            "Категория CRM": "crm_category",
+            "Ответственный блок": "responsible_block",
+            "Статус": "status",
+        }
+
+        scope_col = scope_map.get(analysis_scope)
+
+        if scope_col and selected_value != "Все":
+            work = work[work[scope_col] == selected_value].copy()
+
+        if work.empty:
+            return {
+                "management_summary": "Нет данных после фильтра",
+                "pain_categories": [],
+                "root_causes": [],
+                "priority_actions": []
+            }
+
+        stats_block = crm_build_stats_block(work)
+        sample_block = crm_build_text_sample(work, sample_size=sample_size)
+
+        prompt = f"""
+Ниже CRM-обращения пациентов клинической сети.
+
+Задача:
+1. Выявить реальные боли пациентского пути.
+2. Не сводить всё к регистратуре, если проблема шире.
+3. Разделить:
+   - симптом обращения;
+   - вероятную корневую причину;
+   - операционный блок, который должен разбирать проблему;
+   - риск для клиентского опыта;
+   - приоритет действия.
+4. Не выдумывать причины вне текста.
+5. Если данных недостаточно — явно указать низкую уверенность.
+6. Учитывать CRM-контекст: канал, статус, категорию, клинику, ответственный блок.
+
+Контур анализа:
+- scope: {analysis_scope}
+- selected_value: {selected_value}
+
+СТАТИСТИКА:
+{stats_block}
+
+ПРИМЕРЫ CRM-ОБРАЩЕНИЙ:
+{sample_block}
+
+Верни строго JSON:
+{{
+  "management_summary": "короткий управленческий вывод",
+  "pain_categories": [
+    {{
+      "pain_area": "название боли",
+      "what_patients_report": "что фактически пишут пациенты",
+      "evidence_patterns": ["повторяющийся паттерн 1", "повторяющийся паттерн 2"],
+      "affected_touchpoint": "регистратура|запись|ожидание|оплата|ДМС|приложение|врач|документы|навигация|контакт-центр|другое",
+      "severity": "high|medium|low",
+      "confidence": "high|medium|low"
+    }}
+  ],
+  "root_causes": [
+    {{
+      "root_cause": "корневая причина",
+      "why_it_matters": "почему это влияет на пациентский опыт",
+      "linked_pain_areas": ["..."],
+      "likely_owner": "операционный владелец / подразделение",
+      "evidence": ["короткое evidence 1", "короткое evidence 2"],
+      "confidence": "high|medium|low"
+    }}
+  ],
+  "risk_flags": [
+    {{
+      "risk": "риск",
+      "signal": "какой сигнал в CRM",
+      "priority": "high|medium|low"
+    }}
+  ],
+  "priority_actions": [
+    {{
+      "action": "конкретное действие",
+      "owner": "кто должен делать",
+      "expected_effect": "какой эффект ожидается",
+      "priority": "high|medium|low"
+    }}
+  ]
+}}
+        """.strip()
+
+        parsed = ask_crm_llm_json(prompt)
+
+        parsed["_scope"] = analysis_scope
+        parsed["_selected_value"] = selected_value
+        parsed["_records_used"] = len(work)
+
+        return parsed
+
+    # -----------------------------------------------------
+    # CRM UI
+    # -----------------------------------------------------
+
+    uploaded3 = st.file_uploader(
+        "Загрузите CRM-файл Excel/CSV",
+        type=["xlsx", "csv"],
+        key="uploader3_crm"
+    )
+
+    if uploaded3:
+        try:
+            raw_crm = crm_read_uploaded_table(uploaded3)
+        except Exception as e:
+            st.error("Не удалось прочитать CRM-файл")
+            st.code(repr(e))
+            st.stop()
+
+        st.subheader("1. Маппинг колонок CRM")
+
+        with st.expander("Предпросмотр исходного файла", expanded=False):
+            st.write(raw_crm.columns.tolist())
+            st.dataframe(raw_crm.head(20), use_container_width=True)
+
+        cols = raw_crm.columns.tolist()
+        optional_cols = [CRM_NONE] + cols
+
+        m1, m2 = st.columns(2)
+
+        with m1:
+            crm_date_col = st.selectbox("Дата обращения", cols, key="crm_date_col")
+            crm_text_col = st.selectbox("Текст обращения / описание", cols, key="crm_text_col")
+            crm_clinic_col = st.selectbox("Клиника / филиал", optional_cols, key="crm_clinic_col")
+            crm_channel_col = st.selectbox("Канал обращения", optional_cols, key="crm_channel_col")
+
+        with m2:
+            crm_status_col = st.selectbox("Статус", optional_cols, key="crm_status_col")
+            crm_category_col = st.selectbox("Категория CRM", optional_cols, key="crm_category_col")
+            crm_responsible_col = st.selectbox("Ответственный блок", optional_cols, key="crm_responsible_col")
+            crm_patient_col = st.selectbox("Пациент / ЭМК", optional_cols, key="crm_patient_col")
+            crm_ticket_col = st.selectbox("ID обращения", optional_cols, key="crm_ticket_col")
+
+        try:
+            crm_df = crm_prepare_feedback(
+                raw_crm,
+                date_col=crm_date_col,
+                text_col=crm_text_col,
+                clinic_col=crm_clinic_col,
+                channel_col=crm_channel_col,
+                status_col=crm_status_col,
+                category_col=crm_category_col,
+                responsible_col=crm_responsible_col,
+                patient_col=crm_patient_col,
+                ticket_col=crm_ticket_col,
+            )
+        except Exception as e:
+            st.error("Ошибка подготовки CRM-слоя")
+            st.code(repr(e))
+            st.stop()
+
+        if crm_df.empty:
+            st.warning("После нормализации не осталось валидных CRM-обращений.")
+            st.stop()
+
+        st.success(f"Подготовлено CRM-обращений: {len(crm_df)}")
+
+        with st.expander("Нормализованный CRM-слой", expanded=False):
+            st.dataframe(crm_df.head(50), use_container_width=True)
+
+        st.subheader("2. Фильтры CRM")
+
+        f1, f2, f3, f4 = st.columns(4)
+
+        with f1:
+            crm_freq = st.selectbox("Период", ["Неделя", "Месяц"], key="crm_freq")
+
+        with f2:
+            clinic_filter = st.multiselect(
+                "Клиники",
+                options=sorted(crm_df["clinic"].dropna().unique().tolist()),
+                default=[],
+                key="crm_filter_clinic"
+            )
+
+        with f3:
+            channel_filter = st.multiselect(
+                "Каналы",
+                options=sorted(crm_df["channel"].dropna().unique().tolist()),
+                default=[],
+                key="crm_filter_channel"
+            )
+
+        with f4:
+            category_filter = st.multiselect(
+                "Категории CRM",
+                options=sorted(crm_df["crm_category"].dropna().unique().tolist()),
+                default=[],
+                key="crm_filter_category"
+            )
+
+        crm_work = crm_df.copy()
+
+        if clinic_filter:
+            crm_work = crm_work[crm_work["clinic"].isin(clinic_filter)].copy()
+
+        if channel_filter:
+            crm_work = crm_work[crm_work["channel"].isin(channel_filter)].copy()
+
+        if category_filter:
+            crm_work = crm_work[crm_work["crm_category"].isin(category_filter)].copy()
+
+        if crm_work.empty:
+            st.warning("После фильтров CRM-данных не осталось.")
+            st.stop()
+
+        # -------------------------------------------------
+        # CRM overview
+        # -------------------------------------------------
+
+        st.subheader("3. Общая картина CRM")
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("CRM-обращений", len(crm_work))
+        k2.metric("Клиник", crm_work["clinic"].nunique())
+        k3.metric("Каналов", crm_work["channel"].nunique())
+        k4.metric("Категорий", crm_work["crm_category"].nunique())
+
+        crm_timeline = crm_timeline_summary(crm_work, crm_freq)
+
+        fig_crm_timeline = px.line(
+            crm_timeline,
+            x="period",
+            y="count",
+            markers=True,
+            title=f"Динамика CRM-обращений по {crm_freq.lower()}м"
+        )
+        st.plotly_chart(fig_crm_timeline, use_container_width=True)
+
+        c1, c2 = st.columns(2)
+
+        with c1:
+            st.markdown("### Топ клиник")
+            crm_clinic_counts = crm_value_counts(crm_work, "clinic")
+            st.dataframe(crm_clinic_counts.head(20), use_container_width=True)
+
+            fig_clinic = px.bar(
+                crm_clinic_counts.head(20),
+                x="clinic",
+                y="count",
+                title="CRM-обращения по клиникам"
+            )
+            st.plotly_chart(fig_clinic, use_container_width=True)
+
+        with c2:
+            st.markdown("### Топ каналов")
+            crm_channel_counts = crm_value_counts(crm_work, "channel")
+            st.dataframe(crm_channel_counts.head(20), use_container_width=True)
+
+            fig_channel = px.bar(
+                crm_channel_counts.head(20),
+                x="channel",
+                y="count",
+                title="CRM-обращения по каналам"
+            )
+            st.plotly_chart(fig_channel, use_container_width=True)
+
+        c3, c4 = st.columns(2)
+
+        with c3:
+            st.markdown("### Категории CRM")
+            crm_category_counts = crm_value_counts(crm_work, "crm_category")
+            st.dataframe(crm_category_counts.head(20), use_container_width=True)
+
+        with c4:
+            st.markdown("### Ответственные блоки")
+            crm_responsible_counts = crm_value_counts(crm_work, "responsible_block")
+            st.dataframe(crm_responsible_counts.head(20), use_container_width=True)
+
+        # -------------------------------------------------
+        # CRM cross sections
+        # -------------------------------------------------
+
+        st.subheader("4. Разрезы CRM")
+
+        group_col = st.selectbox(
+            "Группировка для таймлайна",
+            ["clinic", "channel", "crm_category", "responsible_block", "status"],
+            key="crm_group_col"
+        )
+
+        crm_grouped_timeline = crm_group_timeline(crm_work, group_col, crm_freq)
+
+        fig_group_timeline = px.line(
+            crm_grouped_timeline,
+            x="period",
+            y="count",
+            color=group_col,
+            markers=True,
+            title=f"Динамика CRM по разрезу: {group_col}"
+        )
+        st.plotly_chart(fig_group_timeline, use_container_width=True)
+
+        st.dataframe(crm_grouped_timeline, use_container_width=True)
+
+        # -------------------------------------------------
+        # Evidence
+        # -------------------------------------------------
+
+        st.subheader("5. Evidence: реальные обращения")
+
+        e1, e2 = st.columns(2)
+
+        with e1:
+            evidence_dim = st.selectbox(
+                "Поле для отбора evidence",
+                ["clinic", "channel", "crm_category", "responsible_block", "status"],
+                key="crm_evidence_dim"
+            )
+
+        with e2:
+            evidence_values = ["Все"] + sorted(crm_work[evidence_dim].dropna().astype(str).unique().tolist())
+            evidence_value = st.selectbox("Значение", evidence_values, key="crm_evidence_value")
+
+        evidence_df = crm_work.copy()
+        if evidence_value != "Все":
+            evidence_df = evidence_df[evidence_df[evidence_dim].astype(str) == evidence_value].copy()
+
+        evidence_cols = [
+            "date", "clinic", "channel", "status", "crm_category",
+            "responsible_block", "patient_id", "ticket_id", "text"
+        ]
+
+        st.dataframe(
+            evidence_df[evidence_cols].sort_values("date", ascending=False).head(100),
+            use_container_width=True
+        )
+
+        # -------------------------------------------------
+        # CRM LLM
+        # -------------------------------------------------
+
+        st.subheader("6. CRM Root Cause через LLM")
+
+        if "crm_llm_result" not in st.session_state:
+            st.session_state.crm_llm_result = None
+
+        l1, l2, l3 = st.columns(3)
+
+        with l1:
+            crm_analysis_scope = st.selectbox(
+                "Контур анализа",
+                ["Вся CRM", "Клиника", "Канал", "Категория CRM", "Ответственный блок", "Статус"],
+                key="crm_analysis_scope"
+            )
+
+        crm_scope_to_col = {
+            "Вся CRM": None,
+            "Клиника": "clinic",
+            "Канал": "channel",
+            "Категория CRM": "crm_category",
+            "Ответственный блок": "responsible_block",
+            "Статус": "status",
+        }
+
+        scope_col = crm_scope_to_col.get(crm_analysis_scope)
+
+        with l2:
+            if scope_col:
+                scope_values = ["Все"] + sorted(crm_work[scope_col].dropna().astype(str).unique().tolist())
+            else:
+                scope_values = ["Все"]
+
+            crm_selected_scope_value = st.selectbox(
+                "Значение контура",
+                scope_values,
+                key="crm_selected_scope_value"
+            )
+
+        with l3:
+            crm_sample_size = st.slider(
+                "Сколько последних обращений отдавать LLM",
+                min_value=20,
+                max_value=300,
+                value=120,
+                step=20,
+                key="crm_sample_size"
+            )
+
+        run_crm_llm = st.button("▶ CRM Root Cause", key="run_crm_llm")
+
+        if run_crm_llm:
+            with st.spinner("LLM анализирует CRM-обращения..."):
+                st.session_state.crm_llm_result = run_crm_root_cause_llm(
+                    crm_work,
+                    analysis_scope=crm_analysis_scope,
+                    selected_value=crm_selected_scope_value,
+                    sample_size=crm_sample_size
+                )
+
+        crm_llm_result = st.session_state.crm_llm_result
+
+        if crm_llm_result:
+            st.markdown("### Управленческий вывод")
+            st.write(crm_llm_result.get("management_summary", ""))
+
+            st.markdown("### Категории боли")
+            pain_categories_df = pd.DataFrame(crm_llm_result.get("pain_categories", []))
+            st.dataframe(pain_categories_df, use_container_width=True)
+
+            st.markdown("### Корневые причины")
+            root_causes_df = pd.DataFrame(crm_llm_result.get("root_causes", []))
+            st.dataframe(root_causes_df, use_container_width=True)
+
+            st.markdown("### Риски")
+            risk_flags_df = pd.DataFrame(crm_llm_result.get("risk_flags", []))
+            st.dataframe(risk_flags_df, use_container_width=True)
+
+            st.markdown("### Приоритетные действия")
+            priority_actions_df = pd.DataFrame(crm_llm_result.get("priority_actions", []))
+            st.dataframe(priority_actions_df, use_container_width=True)
+
+            with st.expander("Raw JSON CRM LLM", expanded=False):
+                st.json(crm_llm_result)
+
+        # -------------------------------------------------
+        # CRM export
+        # -------------------------------------------------
+
+        st.subheader("7. Экспорт CRM")
+
+        export_crm = {
+            "crm_normalized_filtered": crm_work,
+            "crm_timeline": crm_timeline,
+            "crm_grouped_timeline": crm_grouped_timeline,
+            "crm_by_clinic": crm_value_counts(crm_work, "clinic"),
+            "crm_by_channel": crm_value_counts(crm_work, "channel"),
+            "crm_by_status": crm_value_counts(crm_work, "status"),
+            "crm_by_category": crm_value_counts(crm_work, "crm_category"),
+            "crm_by_responsible": crm_value_counts(crm_work, "responsible_block"),
+            "crm_evidence": evidence_df[evidence_cols].sort_values("date", ascending=False).head(500),
+        }
+
+        if crm_llm_result:
+            export_crm["crm_llm_pain_categories"] = pd.DataFrame(crm_llm_result.get("pain_categories", []))
+            export_crm["crm_llm_root_causes"] = pd.DataFrame(crm_llm_result.get("root_causes", []))
+            export_crm["crm_llm_risk_flags"] = pd.DataFrame(crm_llm_result.get("risk_flags", []))
+            export_crm["crm_llm_priority_actions"] = pd.DataFrame(crm_llm_result.get("priority_actions", []))
+            export_crm["crm_llm_summary"] = pd.DataFrame([{
+                "management_summary": crm_llm_result.get("management_summary", ""),
+                "scope": crm_llm_result.get("_scope", ""),
+                "selected_value": crm_llm_result.get("_selected_value", ""),
+                "records_used": crm_llm_result.get("_records_used", "")
+            }])
+
+        crm_excel_bytes = to_excel_bytes(export_crm)
+
+        st.download_button(
+            "⬇️ Скачать Excel CRM-анализа",
+            data=crm_excel_bytes,
+            file_name="crm_feedback_llm_analysis.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
